@@ -6,6 +6,7 @@
 -- Error codes (matching TigerBeetle CreateAccountsResult)
 local ERR_OK = 0
 local ERR_LINKED_EVENT_FAILED = 1
+local ERR_LINKED_EVENT_CHAIN_OPEN = 2
 local ERR_ID_MUST_NOT_BE_ZERO = 6
 local ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE = 8
 local ERR_DEBITS_PENDING_MUST_BE_ZERO = 9
@@ -32,7 +33,7 @@ end
 -- Parse accounts from JSON
 local accounts = cjson.decode(ARGV[1])
 local results = {}
-local all_success = true
+local chain_start = nil  -- Start index of current linked chain
 
 -- Process each account
 for i, account in ipairs(accounts) do
@@ -91,35 +92,42 @@ for i, account in ipairs(accounts) do
         end
     end
 
-    -- If this account has an error and is linked, fail all
-    if error_code ~= ERR_OK then
-        all_success = false
+    -- Track linked chains
+    local is_linked = has_flag(flags, FLAG_LINKED)
+    if chain_start == nil and is_linked then
+        -- Start of a new linked chain
+        chain_start = i
+    end
 
-        if has_flag(flags, FLAG_LINKED) then
-            -- Roll back all previously created accounts in this batch
-            for j = 1, i - 1 do
-                local prev_key = "account:" .. accounts[j].id
+    -- Handle errors
+    if error_code ~= ERR_OK then
+        if chain_start ~= nil then
+            -- We're in a linked chain - roll back the entire chain
+            for j = chain_start, i - 1 do
+                local prev_account = accounts[j]
+                local prev_key = "account:" .. prev_account.id
                 redis.call('DEL', prev_key)
             end
 
-            -- Return error for all accounts in linked chain
-            results = {}
-            for j = 1, #accounts do
+            -- Mark all accounts in the chain as failed
+            for j = chain_start, i do
                 table.insert(results, {
                     index = j - 1,
                     result = j == i and error_code or ERR_LINKED_EVENT_FAILED
                 })
             end
-            return cjson.encode(results)
+
+            -- Reset chain
+            chain_start = nil
         else
-            -- Just mark this account as failed
+            -- Not in a chain, just fail this account
             table.insert(results, {
                 index = i - 1,
                 result = error_code
             })
         end
     else
-        -- Create the account
+        -- Success - create the account
         local key = "account:" .. account.id
         local timestamp = redis.call('TIME')
         local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
@@ -139,11 +147,31 @@ for i, account in ipairs(accounts) do
             'timestamp', tostring(ts)
         )
 
-        -- Success - no error to report
+        -- Success - report it
         table.insert(results, {
             index = i - 1,
             result = ERR_OK
         })
+
+        -- If this account is NOT linked, the chain ends
+        if not is_linked then
+            chain_start = nil
+        end
+    end
+end
+
+-- Check if there's an open linked chain at the end (error: linked_event_chain_open)
+if chain_start ~= nil then
+    -- Roll back the entire unclosed chain
+    for j = chain_start, #accounts do
+        local prev_account = accounts[j]
+        local prev_key = "account:" .. prev_account.id
+        redis.call('DEL', prev_key)
+        -- Update result for this account
+        results[j] = {
+            index = j - 1,
+            result = ERR_LINKED_EVENT_CHAIN_OPEN
+        }
     end
 end
 

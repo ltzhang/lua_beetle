@@ -6,6 +6,7 @@
 -- Error codes (matching TigerBeetle CreateTransfersResult)
 local ERR_OK = 0
 local ERR_LINKED_EVENT_FAILED = 1
+local ERR_LINKED_EVENT_CHAIN_OPEN = 2
 local ERR_ID_MUST_NOT_BE_ZERO = 5
 local ERR_ACCOUNTS_MUST_BE_DIFFERENT = 12
 local ERR_PENDING_ID_MUST_BE_ZERO = 13
@@ -47,6 +48,8 @@ end
 -- Parse transfers from JSON
 local transfers = cjson.decode(ARGV[1])
 local results = {}
+local chain_start = nil  -- Start index of current linked chain
+local chain_transfers = {}  -- Track transfers created in current chain
 
 -- Process each transfer
 for i, transfer in ipairs(transfers) do
@@ -315,11 +318,19 @@ for i, transfer in ipairs(transfers) do
         end
     end
 
+    -- Track linked chains
+    local is_linked = has_flag(flags, FLAG_LINKED)
+    if chain_start == nil and is_linked then
+        -- Start of a new linked chain
+        chain_start = i
+        chain_transfers = {}
+    end
+
     -- Handle errors and linked flag
     if error_code ~= ERR_OK then
-        if has_flag(flags, FLAG_LINKED) then
-            -- Roll back all previously created transfers in this batch
-            for j = 1, i - 1 do
+        if chain_start ~= nil then
+            -- We're in a linked chain - roll back the entire chain
+            for j = chain_start, i - 1 do
                 local prev_transfer = transfers[j]
                 local prev_key = "transfer:" .. prev_transfer.id
 
@@ -376,28 +387,103 @@ for i, transfer in ipairs(transfers) do
                 end
             end
 
-            -- Return error for all transfers in linked chain
-            results = {}
-            for j = 1, #transfers do
+            -- Mark all transfers in the chain as failed
+            for j = chain_start, i do
                 table.insert(results, {
                     index = j - 1,
                     result = j == i and error_code or ERR_LINKED_EVENT_FAILED
                 })
             end
-            return cjson.encode(results)
+
+            -- Reset chain
+            chain_start = nil
+            chain_transfers = {}
         else
-            -- Just mark this transfer as failed
+            -- Not in a chain, just fail this transfer
             table.insert(results, {
                 index = i - 1,
                 result = error_code
             })
         end
     else
-        -- Success
+        -- Success - transfer was created, add to results
         table.insert(results, {
             index = i - 1,
             result = ERR_OK
         })
+
+        -- If this transfer is NOT linked, the chain ends
+        if not is_linked then
+            chain_start = nil
+            chain_transfers = {}
+        end
+    end
+end
+
+-- Check if there's an open linked chain at the end (error: linked_event_chain_open)
+if chain_start ~= nil then
+    -- Roll back the entire unclosed chain
+    for j = chain_start, #transfers do
+        local prev_transfer = transfers[j]
+        local prev_key = "transfer:" .. prev_transfer.id
+
+        -- Get the transfer to rollback
+        if redis.call('EXISTS', prev_key) == 1 then
+            local prev_data = redis.call('HGETALL', prev_key)
+            local temp = {}
+            for k = 1, #prev_data, 2 do
+                temp[prev_data[k]] = prev_data[k + 1]
+            end
+            prev_data = temp
+
+            -- Reverse the account updates
+            local prev_amount = tonumber(prev_data.amount)
+            local prev_flags = tonumber(prev_data.flags)
+            local prev_debit_key = "account:" .. prev_data.debit_account_id
+            local prev_credit_key = "account:" .. prev_data.credit_account_id
+
+            local was_pending = has_flag(prev_flags, FLAG_PENDING)
+            local was_post = has_flag(prev_flags, FLAG_POST_PENDING_TRANSFER)
+            local was_void = has_flag(prev_flags, FLAG_VOID_PENDING_TRANSFER)
+
+            if was_pending then
+                redis.call('HINCRBY', prev_debit_key, 'debits_pending', -prev_amount)
+                redis.call('HINCRBY', prev_credit_key, 'credits_pending', -prev_amount)
+            elseif was_post then
+                redis.call('HINCRBY', prev_debit_key, 'debits_pending', prev_amount)
+                redis.call('HINCRBY', prev_debit_key, 'debits_posted', -prev_amount)
+                redis.call('HINCRBY', prev_credit_key, 'credits_pending', prev_amount)
+                redis.call('HINCRBY', prev_credit_key, 'credits_posted', -prev_amount)
+            elseif was_void then
+                redis.call('HINCRBY', prev_debit_key, 'debits_pending', prev_amount)
+                redis.call('HINCRBY', prev_credit_key, 'credits_pending', prev_amount)
+            else
+                redis.call('HINCRBY', prev_debit_key, 'debits_posted', -prev_amount)
+                redis.call('HINCRBY', prev_credit_key, 'credits_posted', -prev_amount)
+            end
+
+            -- Delete the transfer
+            redis.call('DEL', prev_key)
+
+            -- Remove from transfer indexes
+            redis.call('ZREM', 'account:' .. prev_data.debit_account_id .. ':transfers', prev_data.id)
+            redis.call('ZREM', 'account:' .. prev_data.credit_account_id .. ':transfers', prev_data.id)
+
+            -- Remove from balance history (if exists)
+            local prev_ts = prev_data.timestamp
+            redis.call('ZREMRANGEBYSCORE',
+                'account:' .. prev_data.debit_account_id .. ':balance_history',
+                prev_ts, prev_ts)
+            redis.call('ZREMRANGEBYSCORE',
+                'account:' .. prev_data.credit_account_id .. ':balance_history',
+                prev_ts, prev_ts)
+        end
+
+        -- Update result for this transfer
+        results[j] = {
+            index = j - 1,
+            result = ERR_LINKED_EVENT_CHAIN_OPEN
+        }
     end
 end
 

@@ -402,18 +402,62 @@ balance_data = json.loads(result)
 
 ### Linked Operations
 
-Use the LINKED flag to ensure all operations in a batch succeed or fail together:
+The `linked` flag creates **chains** of operations that must all succeed or all fail together. This matches TigerBeetle's behavior exactly.
 
+#### How Linked Chains Work
+
+- A chain **starts** when an operation has the `linked` flag set
+- The chain **continues** as long as subsequent operations have the `linked` flag
+- The chain **ends** when an operation does NOT have the `linked` flag (or the batch ends)
+- If ANY operation in a chain fails, the ENTIRE chain is rolled back
+- Multiple independent chains can exist in a single batch
+
+#### Examples
+
+**Simple Chain (all-or-nothing):**
 ```python
-# All accounts created atomically or none
 accounts = [
-    {"id": "1", "ledger": 700, "code": 10, "flags": 1},  # LINKED
-    {"id": "2", "ledger": 700, "code": 10, "flags": 1},  # LINKED
-    {"id": "3", "ledger": 700, "code": 10, "flags": 0}
+    {"id": "1", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED - chain starts
+    {"id": "2", "ledger": 700, "code": 10, "flags": 0}        # NOT linked - chain ends
 ]
+# Both accounts are created, or neither (if any fails)
 ```
 
-If any account fails, all previous accounts in the linked chain are rolled back.
+**Multiple Independent Chains:**
+```python
+accounts = [
+    # Chain 1
+    {"id": "1", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED
+    {"id": "2", "ledger": 700, "code": 10, "flags": 0},       # NOT linked - Chain 1 ends
+
+    # Chain 2
+    {"id": "3", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED
+    {"id": "4", "ledger": 700, "code": 10, "flags": 0},       # NOT linked - Chain 2 ends
+]
+# Chain 1 and Chain 2 are independent
+# If Chain 1 fails, Chain 2 can still succeed (and vice versa)
+```
+
+**Long Chain:**
+```python
+accounts = [
+    {"id": "1", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED
+    {"id": "2", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED (chain continues)
+    {"id": "3", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED (chain continues)
+    {"id": "4", "ledger": 700, "code": 10, "flags": 0}        # NOT linked - chain ends
+]
+# All 4 accounts created atomically, or none
+```
+
+**Error: Unclosed Chain:**
+```python
+accounts = [
+    {"id": "1", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED
+    {"id": "2", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED (still linked!)
+]
+# ERROR: linked_event_chain_open (2)
+# Chain never closed - all operations fail and are rolled back
+```
 
 ### Balance Constraints
 

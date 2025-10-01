@@ -241,25 +241,52 @@ def test_void_pending_transfer():
     print("✓ Passed")
 
 def test_linked_accounts():
-    """Test linked account creation (all-or-nothing)"""
+    """Test linked account creation (chains)"""
     cleanup()
     print("Test: Linked accounts...")
 
-    # Create accounts with second one invalid and linked flag set
+    # Test 1: Linked chain with failure - both should fail
     accounts = [
-        {"id": "1", "ledger": 700, "code": 10, "flags": 1},  # LINKED
-        {"id": "1", "ledger": 700, "code": 10, "flags": 0}   # Duplicate ID
+        {"id": "1", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED (starts chain)
+        {"id": "1", "ledger": 700, "code": 10, "flags": 0}  # Duplicate ID, NOT linked (ends chain)
     ]
 
     result = r.evalsha(create_accounts_sha, 0, json.dumps(accounts))
     results = json.loads(result)
 
-    # Both should fail
+    # Both should fail because account 2 has duplicate ID
     assert results[0]['result'] == 1, f"Expected result 1 (linked_event_failed), got {results[0]['result']}"
     assert results[1]['result'] == 21, f"Expected result 21 (exists), got {results[1]['result']}"
 
     # First account should not exist (rolled back)
     assert r.exists("account:1") == 0, "Account 1 should not exist after rollback"
+
+    # Test 2: Multiple independent chains in one batch
+    cleanup()
+    accounts = [
+        {"id": "1", "ledger": 700, "code": 10, "flags": 0x0001},  # Chain 1 start (LINKED)
+        {"id": "2", "ledger": 700, "code": 10, "flags": 0},       # Chain 1 end (NOT linked) - succeeds
+        {"id": "3", "ledger": 700, "code": 10, "flags": 0x0001},  # Chain 2 start (LINKED)
+        {"id": "0", "ledger": 700, "code": 10, "flags": 0}        # Chain 2 end (NOT linked) - fails (invalid ID)
+    ]
+
+    result = r.evalsha(create_accounts_sha, 0, json.dumps(accounts))
+    results = json.loads(result)
+
+    # Chain 1 should succeed
+    assert results[0]['result'] == 0, f"Account 1 should succeed, got {results[0]['result']}"
+    assert results[1]['result'] == 0, f"Account 2 should succeed, got {results[1]['result']}"
+
+    # Chain 2 should fail
+    assert results[2]['result'] == 1, f"Account 3 should fail with linked_event_failed, got {results[2]['result']}"
+    assert results[3]['result'] == 6, f"Account 4 should fail with id_must_not_be_zero, got {results[3]['result']}"
+
+    # Chain 1 accounts should exist
+    assert r.exists("account:1") == 1, "Account 1 should exist"
+    assert r.exists("account:2") == 1, "Account 2 should exist"
+
+    # Chain 2 accounts should not exist (rolled back)
+    assert r.exists("account:3") == 0, "Account 3 should not exist after rollback"
 
     print("✓ Passed")
 
