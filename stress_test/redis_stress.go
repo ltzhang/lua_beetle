@@ -120,8 +120,8 @@ func (r *RedisStressTest) Setup(ctx context.Context) error {
 		}
 
 		for _, res := range results {
-			if errCode := res["error"].(float64); errCode != 0 {
-				return fmt.Errorf("account creation failed with error code: %v", errCode)
+			if errCode := res["result"].(float64); errCode != 0 {
+				return fmt.Errorf("account creation failed with result code: %v", errCode)
 			}
 		}
 
@@ -271,7 +271,7 @@ func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counte
 
 	successCount := 0
 	for _, res := range results {
-		if errCode := res["error"].(float64); errCode == 0 {
+		if errCode := res["result"].(float64); errCode == 0 {
 			successCount++
 		}
 	}

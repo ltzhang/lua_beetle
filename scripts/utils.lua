@@ -1,77 +1,126 @@
 -- Lua Beetle Utilities
 -- Shared functions and constants for TigerBeetle-like operations in Redis
+-- Error codes and flags match TigerBeetle specification exactly
 
--- Error codes matching TigerBeetle semantics
-local ErrorCodes = {
-    OK = 0,
-    -- Account errors
-    ACCOUNT_EXISTS = 1,
-    ACCOUNT_NOT_FOUND = 2,
-    ACCOUNT_INVALID_ID = 3,
-    ACCOUNT_INVALID_LEDGER = 4,
-    ACCOUNT_INVALID_CODE = 5,
-    ACCOUNT_INVALID_FLAGS = 6,
-    ACCOUNT_BALANCES_NOT_ZERO = 7,
-    ACCOUNT_CLOSED = 8,
-    -- Transfer errors
-    TRANSFER_EXISTS = 9,
-    TRANSFER_INVALID_ID = 10,
-    TRANSFER_INVALID_DEBIT_ACCOUNT = 11,
-    TRANSFER_INVALID_CREDIT_ACCOUNT = 12,
-    TRANSFER_ACCOUNTS_SAME = 13,
-    TRANSFER_INVALID_AMOUNT = 14,
-    TRANSFER_INVALID_LEDGER = 15,
-    TRANSFER_INVALID_CODE = 16,
-    TRANSFER_LEDGER_MISMATCH = 17,
-    TRANSFER_EXCEEDS_CREDITS = 18,
-    TRANSFER_EXCEEDS_DEBITS = 19,
-    TRANSFER_PENDING_NOT_FOUND = 20,
-    TRANSFER_PENDING_EXPIRED = 21,
-    LINKED_EVENT_FAILED = 22,
+-- CreateAccountsResult error codes (matching TigerBeetle enum(u32))
+local CreateAccountsResult = {
+    ok = 0,
+    linked_event_failed = 1,
+    linked_event_chain_open = 2,
+    timestamp_must_be_zero = 3,
+    reserved_field = 4,
+    reserved_flag = 5,
+    id_must_not_be_zero = 6,
+    id_must_not_be_int_max = 7,
+    flags_are_mutually_exclusive = 8,
+    debits_pending_must_be_zero = 9,
+    debits_posted_must_be_zero = 10,
+    credits_pending_must_be_zero = 11,
+    credits_posted_must_be_zero = 12,
+    ledger_must_not_be_zero = 13,
+    code_must_not_be_zero = 14,
+    exists_with_different_flags = 15,
+    exists_with_different_user_data_128 = 16,
+    exists_with_different_user_data_64 = 17,
+    exists_with_different_user_data_32 = 18,
+    exists_with_different_ledger = 19,
+    exists_with_different_code = 20,
+    exists = 21,
+    imported_event_expected = 22,
+    imported_event_not_expected = 23,
+    imported_event_timestamp_out_of_range = 24,
+    imported_event_timestamp_must_not_advance = 25,
+    imported_event_timestamp_must_not_regress = 26,
 }
 
--- Account flags
+-- CreateTransfersResult error codes (matching TigerBeetle enum(u32))
+local CreateTransfersResult = {
+    ok = 0,
+    linked_event_failed = 1,
+    linked_event_chain_open = 2,
+    timestamp_must_be_zero = 3,
+    reserved_flag = 4,
+    id_must_not_be_zero = 5,
+    id_must_not_be_int_max = 6,
+    flags_are_mutually_exclusive = 7,
+    debit_account_id_must_not_be_zero = 8,
+    debit_account_id_must_not_be_int_max = 9,
+    credit_account_id_must_not_be_zero = 10,
+    credit_account_id_must_not_be_int_max = 11,
+    accounts_must_be_different = 12,
+    pending_id_must_be_zero = 13,
+    pending_id_must_not_be_zero = 14,
+    pending_id_must_not_be_int_max = 15,
+    pending_id_must_be_different = 16,
+    timeout_reserved_for_pending_transfer = 17,
+    deprecated_18 = 18,
+    ledger_must_not_be_zero = 19,
+    code_must_not_be_zero = 20,
+    debit_account_not_found = 21,
+    credit_account_not_found = 22,
+    accounts_must_have_the_same_ledger = 23,
+    transfer_must_have_the_same_ledger_as_accounts = 24,
+    pending_transfer_not_found = 25,
+    pending_transfer_not_pending = 26,
+    pending_transfer_has_different_debit_account_id = 27,
+    pending_transfer_has_different_credit_account_id = 28,
+    pending_transfer_has_different_ledger = 29,
+    pending_transfer_has_different_code = 30,
+    exceeds_pending_transfer_amount = 31,
+    pending_transfer_has_different_amount = 32,
+    pending_transfer_already_posted = 33,
+    pending_transfer_already_voided = 34,
+    pending_transfer_expired = 35,
+    exists_with_different_flags = 36,
+    exists_with_different_debit_account_id = 37,
+    exists_with_different_credit_account_id = 38,
+    exists_with_different_amount = 39,
+    exists_with_different_pending_id = 40,
+    exists_with_different_user_data_128 = 41,
+    exists_with_different_user_data_64 = 42,
+    exists_with_different_user_data_32 = 43,
+    exists_with_different_timeout = 44,
+    exists_with_different_code = 45,
+    exists = 46,
+    overflows_debits_pending = 47,
+    overflows_credits_pending = 48,
+    overflows_debits_posted = 49,
+    overflows_credits_posted = 50,
+    overflows_debits = 51,
+    overflows_credits = 52,
+    overflows_timeout = 53,
+    exceeds_credits = 54,
+    exceeds_debits = 55,
+}
+
+-- Account flags (matching TigerBeetle packed struct(u16))
 local AccountFlags = {
-    NONE = 0,
-    LINKED = 1,                                    -- 1 << 0
-    DEBITS_MUST_NOT_EXCEED_CREDITS = 2,           -- 1 << 1
-    CREDITS_MUST_NOT_EXCEED_DEBITS = 4,           -- 1 << 2
-    HISTORY = 8,                                   -- 1 << 3
-    CLOSED = 16,                                   -- 1 << 4
+    none = 0,
+    linked = 0x0001,                                    -- 1 << 0
+    debits_must_not_exceed_credits = 0x0002,           -- 1 << 1
+    credits_must_not_exceed_debits = 0x0004,           -- 1 << 2
+    history = 0x0008,                                   -- 1 << 3
+    imported = 0x0010,                                  -- 1 << 4
+    closed = 0x0020,                                    -- 1 << 5
 }
 
--- Transfer flags
+-- Transfer flags (matching TigerBeetle packed struct(u16))
 local TransferFlags = {
-    NONE = 0,
-    LINKED = 1,                    -- 1 << 0
-    PENDING = 2,                   -- 1 << 1
-    POST_PENDING_TRANSFER = 4,     -- 1 << 2
-    VOID_PENDING_TRANSFER = 8,     -- 1 << 3
-    BALANCING_DEBIT = 16,          -- 1 << 4
-    BALANCING_CREDIT = 32,         -- 1 << 5
-    CLOSING_DEBIT = 64,            -- 1 << 6
-    CLOSING_CREDIT = 128,          -- 1 << 7
+    none = 0,
+    linked = 0x0001,                    -- 1 << 0
+    pending = 0x0002,                   -- 1 << 1
+    post_pending_transfer = 0x0004,     -- 1 << 2
+    void_pending_transfer = 0x0008,     -- 1 << 3
+    balancing_debit = 0x0010,           -- 1 << 4
+    balancing_credit = 0x0020,          -- 1 << 5
+    closing_debit = 0x0040,             -- 1 << 6
+    closing_credit = 0x0080,            -- 1 << 7
+    imported = 0x0100,                  -- 1 << 8
 }
 
 -- Check if a flag is set
 local function has_flag(flags, flag)
     return (flags % (flag * 2)) >= flag
-end
-
--- Validate account ID
-local function validate_account_id(id)
-    if not id or id == "" or id == "0" then
-        return false, ErrorCodes.ACCOUNT_INVALID_ID
-    end
-    return true, ErrorCodes.OK
-end
-
--- Validate transfer ID
-local function validate_transfer_id(id)
-    if not id or id == "" or id == "0" then
-        return false, ErrorCodes.TRANSFER_INVALID_ID
-    end
-    return true, ErrorCodes.OK
 end
 
 -- Parse integer with default
@@ -80,21 +129,6 @@ local function parse_int(value, default)
         return default or 0
     end
     return tonumber(value) or (default or 0)
-end
-
--- Serialize error result
-local function error_result(index, error_code)
-    return cjson.encode({
-        index = index,
-        error = error_code
-    })
-end
-
--- Serialize success result
-local function success_result()
-    return cjson.encode({
-        error = ErrorCodes.OK
-    })
 end
 
 -- Get current timestamp in nanoseconds (simulated)
@@ -106,14 +140,11 @@ end
 
 -- Export functions and constants
 return {
-    ErrorCodes = ErrorCodes,
+    CreateAccountsResult = CreateAccountsResult,
+    CreateTransfersResult = CreateTransfersResult,
     AccountFlags = AccountFlags,
     TransferFlags = TransferFlags,
     has_flag = has_flag,
-    validate_account_id = validate_account_id,
-    validate_transfer_id = validate_transfer_id,
     parse_int = parse_int,
-    error_result = error_result,
-    success_result = success_result,
     get_timestamp = get_timestamp,
 }

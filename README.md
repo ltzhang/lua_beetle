@@ -78,13 +78,13 @@ python3 test_basic.py
 - `ledger`: Ledger identifier (non-zero integer)
 - `code`: Account type code (non-zero integer)
 
-**Account Flags:**
-- `0`: None
-- `1`: LINKED - Chain account creation (all-or-nothing)
-- `2`: DEBITS_MUST_NOT_EXCEED_CREDITS - Prevent overdrafts
-- `4`: CREDITS_MUST_NOT_EXCEED_DEBITS - Prevent negative balances
-- `8`: HISTORY - Retain balance history
-- `16`: CLOSED - Prevent further transfers
+**Account Flags (matching TigerBeetle):**
+- `0x0001` (1): `linked` - Chain account creation (all-or-nothing)
+- `0x0002` (2): `debits_must_not_exceed_credits` - Prevent overdrafts
+- `0x0004` (4): `credits_must_not_exceed_debits` - Prevent negative balances
+- `0x0008` (8): `history` - Retain balance history
+- `0x0010` (16): `imported` - Allow importing historical accounts
+- `0x0020` (32): `closed` - Prevent further transfers
 
 #### Transfer
 
@@ -113,16 +113,16 @@ python3 test_basic.py
 - `amount`: Transfer amount (positive integer)
 - `ledger`: Ledger identifier (must match accounts)
 
-**Transfer Flags:**
-- `0`: None (single-phase immediate transfer)
-- `1`: LINKED - Chain transfer outcomes
-- `2`: PENDING - Create pending transfer
-- `4`: POST_PENDING_TRANSFER - Post a pending transfer
-- `8`: VOID_PENDING_TRANSFER - Void a pending transfer
-- `16`: BALANCING_DEBIT - Adjust based on debit constraints
-- `32`: BALANCING_CREDIT - Adjust based on credit constraints
-- `64`: CLOSING_DEBIT - Close debit account
-- `128`: CLOSING_CREDIT - Close credit account
+**Transfer Flags (matching TigerBeetle):**
+- `0x0001` (1): `linked` - Chain transfer outcomes
+- `0x0002` (2): `pending` - Create pending transfer
+- `0x0004` (4): `post_pending_transfer` - Post a pending transfer
+- `0x0008` (8): `void_pending_transfer` - Void a pending transfer
+- `0x0010` (16): `balancing_debit` - Adjust based on debit constraints
+- `0x0020` (32): `balancing_credit` - Adjust based on credit constraints
+- `0x0040` (64): `closing_debit` - Close debit account
+- `0x0080` (128): `closing_credit` - Close credit account
+- `0x0100` (256): `imported` - Allow importing historical transfers
 
 ### Operations
 
@@ -361,28 +361,42 @@ balance_data = json.loads(result)
 
 ### Error Codes
 
-| Code | Error | Description |
-|------|-------|-------------|
-| 0 | OK | Success |
-| 1 | ACCOUNT_EXISTS | Account ID already exists |
-| 2 | ACCOUNT_NOT_FOUND | Account not found |
-| 3 | ACCOUNT_INVALID_ID | Invalid account ID |
-| 4 | ACCOUNT_INVALID_LEDGER | Invalid ledger value |
-| 5 | ACCOUNT_INVALID_CODE | Invalid code value |
-| 7 | ACCOUNT_BALANCES_NOT_ZERO | Initial balances must be zero |
-| 8 | ACCOUNT_CLOSED | Account is closed |
-| 9 | TRANSFER_EXISTS | Transfer ID already exists |
-| 10 | TRANSFER_INVALID_ID | Invalid transfer ID |
-| 11 | TRANSFER_INVALID_DEBIT_ACCOUNT | Debit account not found |
-| 12 | TRANSFER_INVALID_CREDIT_ACCOUNT | Credit account not found |
-| 13 | TRANSFER_ACCOUNTS_SAME | Debit and credit accounts are same |
-| 14 | TRANSFER_INVALID_AMOUNT | Amount must be positive |
-| 15 | TRANSFER_INVALID_LEDGER | Invalid ledger value |
-| 17 | TRANSFER_LEDGER_MISMATCH | Account ledgers don't match |
-| 18 | TRANSFER_EXCEEDS_CREDITS | Transfer would exceed credit limit |
-| 19 | TRANSFER_EXCEEDS_DEBITS | Transfer would exceed debit limit |
-| 20 | TRANSFER_PENDING_NOT_FOUND | Pending transfer not found |
-| 22 | LINKED_EVENT_FAILED | Linked operation failed |
+**Note:** Error codes and names now match TigerBeetle's specification exactly. Results are returned in a `result` field (not `error`).
+
+#### CreateAccountsResult
+
+| Code | Error Name | Description |
+|------|------------|-------------|
+| 0 | ok | Success |
+| 1 | linked_event_failed | Linked operation failed |
+| 6 | id_must_not_be_zero | Account ID must not be zero |
+| 8 | flags_are_mutually_exclusive | Conflicting flags set |
+| 9 | debits_pending_must_be_zero | Initial debits_pending must be zero |
+| 10 | debits_posted_must_be_zero | Initial debits_posted must be zero |
+| 11 | credits_pending_must_be_zero | Initial credits_pending must be zero |
+| 12 | credits_posted_must_be_zero | Initial credits_posted must be zero |
+| 13 | ledger_must_not_be_zero | Ledger must not be zero |
+| 14 | code_must_not_be_zero | Code must not be zero |
+| 21 | exists | Account already exists |
+
+#### CreateTransfersResult
+
+| Code | Error Name | Description |
+|------|------------|-------------|
+| 0 | ok | Success |
+| 1 | linked_event_failed | Linked operation failed |
+| 5 | id_must_not_be_zero | Transfer ID must not be zero |
+| 12 | accounts_must_be_different | Debit and credit accounts are same |
+| 19 | ledger_must_not_be_zero | Ledger must not be zero |
+| 21 | debit_account_not_found | Debit account not found |
+| 22 | credit_account_not_found | Credit account not found |
+| 24 | transfer_must_have_the_same_ledger_as_accounts | Ledger mismatch |
+| 25 | pending_transfer_not_found | Pending transfer not found |
+| 46 | exists | Transfer already exists |
+| 54 | exceeds_credits | Transfer exceeds credit limit |
+| 55 | exceeds_debits | Transfer exceeds debit limit |
+
+**For complete error code reference, see [TigerBeetle Documentation](https://docs.tigerbeetle.com/)**
 
 ## Advanced Usage
 

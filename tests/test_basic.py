@@ -58,7 +58,7 @@ def test_create_single_account():
     results = json.loads(result)
 
     assert len(results) == 1, f"Expected 1 result, got {len(results)}"
-    assert results[0]['error'] == 0, f"Expected error 0, got {results[0]['error']}"
+    assert results[0]['result'] == 0, f"Expected result 0, got {results[0]['result']}"
 
     # Verify account exists
     account_data = r.hgetall("account:1")
@@ -89,7 +89,7 @@ def test_create_duplicate_account():
     result = r.evalsha(create_accounts_sha, 0, json.dumps(accounts))
     results = json.loads(result)
 
-    assert results[0]['error'] == 1, f"Expected error 1 (ACCOUNT_EXISTS), got {results[0]['error']}"
+    assert results[0]['result'] == 21, f"Expected result 21 (exists), got {results[0]['result']}"
     print("✓ Passed")
 
 def test_simple_transfer():
@@ -118,7 +118,7 @@ def test_simple_transfer():
     result = r.evalsha(create_transfers_sha, 0, json.dumps(transfers))
     results = json.loads(result)
 
-    assert results[0]['error'] == 0, f"Expected error 0, got {results[0]['error']}"
+    assert results[0]['result'] == 0, f"Expected result 0, got {results[0]['result']}"
 
     # Check account balances
     account1 = r.hgetall("account:1")
@@ -154,7 +154,7 @@ def test_pending_transfer():
 
     result = r.evalsha(create_transfers_sha, 0, json.dumps(transfers))
     results = json.loads(result)
-    assert results[0]['error'] == 0, f"Expected error 0, got {results[0]['error']}"
+    assert results[0]['result'] == 0, f"Expected result 0, got {results[0]['result']}"
 
     # Check pending balances
     account1 = r.hgetall("account:1")
@@ -178,7 +178,7 @@ def test_pending_transfer():
 
     result = r.evalsha(create_transfers_sha, 0, json.dumps(post_transfers))
     results = json.loads(result)
-    assert results[0]['error'] == 0, f"Expected error 0, got {results[0]['error']}"
+    assert results[0]['result'] == 0, f"Expected result 0, got {results[0]['result']}"
 
     # Check posted balances
     account1 = r.hgetall("account:1")
@@ -228,7 +228,7 @@ def test_void_pending_transfer():
 
     result = r.evalsha(create_transfers_sha, 0, json.dumps(void_transfers))
     results = json.loads(result)
-    assert results[0]['error'] == 0, f"Expected error 0, got {results[0]['error']}"
+    assert results[0]['result'] == 0, f"Expected result 0, got {results[0]['result']}"
 
     # Check balances are back to zero
     account1 = r.hgetall("account:1")
@@ -255,8 +255,8 @@ def test_linked_accounts():
     results = json.loads(result)
 
     # Both should fail
-    assert results[0]['error'] == 22, f"Expected error 22 (LINKED_EVENT_FAILED), got {results[0]['error']}"
-    assert results[1]['error'] == 1, f"Expected error 1 (ACCOUNT_EXISTS), got {results[1]['error']}"
+    assert results[0]['result'] == 1, f"Expected result 1 (linked_event_failed), got {results[0]['result']}"
+    assert results[1]['result'] == 21, f"Expected result 21 (exists), got {results[1]['result']}"
 
     # First account should not exist (rolled back)
     assert r.exists("account:1") == 0, "Account 1 should not exist after rollback"
@@ -313,7 +313,7 @@ def test_balance_constraints():
     result = r.evalsha(create_transfers_sha, 0, json.dumps(transfers))
     results = json.loads(result)
 
-    assert results[0]['error'] == 18, f"Expected error 18 (EXCEEDS_CREDITS), got {results[0]['error']}"
+    assert results[0]['result'] == 54, f"Expected result 54 (exceeds_credits), got {results[0]['result']}"
 
     print("✓ Passed")
 

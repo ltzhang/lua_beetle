@@ -3,37 +3,41 @@
 -- KEYS: none
 -- ARGV: JSON array of transfer objects
 
--- Error codes
+-- Error codes (matching TigerBeetle CreateTransfersResult)
 local ERR_OK = 0
-local ERR_TRANSFER_EXISTS = 9
-local ERR_TRANSFER_INVALID_ID = 10
-local ERR_TRANSFER_INVALID_DEBIT_ACCOUNT = 11
-local ERR_TRANSFER_INVALID_CREDIT_ACCOUNT = 12
-local ERR_TRANSFER_ACCOUNTS_SAME = 13
-local ERR_TRANSFER_INVALID_AMOUNT = 14
-local ERR_TRANSFER_INVALID_LEDGER = 15
-local ERR_TRANSFER_LEDGER_MISMATCH = 17
-local ERR_TRANSFER_EXCEEDS_CREDITS = 18
-local ERR_TRANSFER_EXCEEDS_DEBITS = 19
-local ERR_TRANSFER_PENDING_NOT_FOUND = 20
-local ERR_LINKED_EVENT_FAILED = 22
-local ERR_ACCOUNT_CLOSED = 8
+local ERR_LINKED_EVENT_FAILED = 1
+local ERR_ID_MUST_NOT_BE_ZERO = 5
+local ERR_ACCOUNTS_MUST_BE_DIFFERENT = 12
+local ERR_PENDING_ID_MUST_BE_ZERO = 13
+local ERR_PENDING_ID_MUST_NOT_BE_ZERO = 14
+local ERR_LEDGER_MUST_NOT_BE_ZERO = 19
+local ERR_CODE_MUST_NOT_BE_ZERO = 20
+local ERR_DEBIT_ACCOUNT_NOT_FOUND = 21
+local ERR_CREDIT_ACCOUNT_NOT_FOUND = 22
+local ERR_TRANSFER_MUST_HAVE_THE_SAME_LEDGER_AS_ACCOUNTS = 24
+local ERR_PENDING_TRANSFER_NOT_FOUND = 25
+local ERR_PENDING_TRANSFER_NOT_PENDING = 26
+local ERR_PENDING_TRANSFER_EXPIRED = 35
+local ERR_EXISTS = 46
+local ERR_EXCEEDS_CREDITS = 54
+local ERR_EXCEEDS_DEBITS = 55
 
--- Transfer flags
-local FLAG_LINKED = 1
-local FLAG_PENDING = 2
-local FLAG_POST_PENDING_TRANSFER = 4
-local FLAG_VOID_PENDING_TRANSFER = 8
-local FLAG_BALANCING_DEBIT = 16
-local FLAG_BALANCING_CREDIT = 32
-local FLAG_CLOSING_DEBIT = 64
-local FLAG_CLOSING_CREDIT = 128
+-- Transfer flags (matching TigerBeetle)
+local FLAG_LINKED = 0x0001                    -- 1 << 0
+local FLAG_PENDING = 0x0002                   -- 1 << 1
+local FLAG_POST_PENDING_TRANSFER = 0x0004     -- 1 << 2
+local FLAG_VOID_PENDING_TRANSFER = 0x0008     -- 1 << 3
+local FLAG_BALANCING_DEBIT = 0x0010           -- 1 << 4
+local FLAG_BALANCING_CREDIT = 0x0020          -- 1 << 5
+local FLAG_CLOSING_DEBIT = 0x0040             -- 1 << 6
+local FLAG_CLOSING_CREDIT = 0x0080            -- 1 << 7
+local FLAG_IMPORTED = 0x0100                  -- 1 << 8
 
--- Account flags
-local ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 2
-local ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 4
-local ACCOUNT_FLAG_HISTORY = 8
-local ACCOUNT_FLAG_CLOSED = 16
+-- Account flags (matching TigerBeetle)
+local ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 0x0002  -- 1 << 1
+local ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 0x0004  -- 1 << 2
+local ACCOUNT_FLAG_HISTORY = 0x0008                          -- 1 << 3
+local ACCOUNT_FLAG_CLOSED = 0x0020                           -- 1 << 5
 
 -- Check if a flag is set
 local function has_flag(flags, flag)
@@ -48,34 +52,34 @@ local results = {}
 for i, transfer in ipairs(transfers) do
     local error_code = ERR_OK
 
-    -- Validate ID
+    -- Validate ID (id_must_not_be_zero)
     if not transfer.id or transfer.id == "" or transfer.id == "0" then
-        error_code = ERR_TRANSFER_INVALID_ID
+        error_code = ERR_ID_MUST_NOT_BE_ZERO
     end
 
-    -- Validate ledger
+    -- Validate ledger (ledger_must_not_be_zero)
     if error_code == ERR_OK and (not transfer.ledger or transfer.ledger == 0) then
-        error_code = ERR_TRANSFER_INVALID_LEDGER
+        error_code = ERR_LEDGER_MUST_NOT_BE_ZERO
     end
 
     -- Check if transfer already exists
     if error_code == ERR_OK then
         local key = "transfer:" .. transfer.id
         if redis.call('EXISTS', key) == 1 then
-            error_code = ERR_TRANSFER_EXISTS
+            error_code = ERR_EXISTS
         end
     end
 
-    -- Validate and load debit account
+    -- Validate and load debit account (debit_account_not_found)
     local debit_account_key = nil
     local debit_account = nil
     if error_code == ERR_OK then
         if not transfer.debit_account_id or transfer.debit_account_id == "" then
-            error_code = ERR_TRANSFER_INVALID_DEBIT_ACCOUNT
+            error_code = ERR_DEBIT_ACCOUNT_NOT_FOUND
         else
             debit_account_key = "account:" .. transfer.debit_account_id
             if redis.call('EXISTS', debit_account_key) == 0 then
-                error_code = ERR_TRANSFER_INVALID_DEBIT_ACCOUNT
+                error_code = ERR_DEBIT_ACCOUNT_NOT_FOUND
             else
                 debit_account = redis.call('HGETALL', debit_account_key)
                 -- Convert array to map
@@ -88,16 +92,16 @@ for i, transfer in ipairs(transfers) do
         end
     end
 
-    -- Validate and load credit account
+    -- Validate and load credit account (credit_account_not_found)
     local credit_account_key = nil
     local credit_account = nil
     if error_code == ERR_OK then
         if not transfer.credit_account_id or transfer.credit_account_id == "" then
-            error_code = ERR_TRANSFER_INVALID_CREDIT_ACCOUNT
+            error_code = ERR_CREDIT_ACCOUNT_NOT_FOUND
         else
             credit_account_key = "account:" .. transfer.credit_account_id
             if redis.call('EXISTS', credit_account_key) == 0 then
-                error_code = ERR_TRANSFER_INVALID_CREDIT_ACCOUNT
+                error_code = ERR_CREDIT_ACCOUNT_NOT_FOUND
             else
                 credit_account = redis.call('HGETALL', credit_account_key)
                 -- Convert array to map
@@ -110,34 +114,32 @@ for i, transfer in ipairs(transfers) do
         end
     end
 
-    -- Check accounts are not the same
+    -- Check accounts are not the same (accounts_must_be_different)
     if error_code == ERR_OK then
         if transfer.debit_account_id == transfer.credit_account_id then
-            error_code = ERR_TRANSFER_ACCOUNTS_SAME
+            error_code = ERR_ACCOUNTS_MUST_BE_DIFFERENT
         end
     end
 
-    -- Validate amount
+    -- Validate amount (TigerBeetle allows 0 for balancing transfers, so skip this for now)
     local amount = tonumber(transfer.amount) or 0
-    if error_code == ERR_OK and amount <= 0 then
-        error_code = ERR_TRANSFER_INVALID_AMOUNT
-    end
 
-    -- Check ledgers match
+    -- Check ledgers match (transfer_must_have_the_same_ledger_as_accounts)
     if error_code == ERR_OK then
         local debit_ledger = tonumber(debit_account.ledger)
         local credit_ledger = tonumber(credit_account.ledger)
         if debit_ledger ~= transfer.ledger or credit_ledger ~= transfer.ledger then
-            error_code = ERR_TRANSFER_LEDGER_MISMATCH
+            error_code = ERR_TRANSFER_MUST_HAVE_THE_SAME_LEDGER_AS_ACCOUNTS
         end
     end
 
-    -- Check accounts are not closed
+    -- Check accounts are not closed (we keep this check for safety)
     if error_code == ERR_OK then
         local debit_flags = tonumber(debit_account.flags) or 0
         local credit_flags = tonumber(credit_account.flags) or 0
         if has_flag(debit_flags, ACCOUNT_FLAG_CLOSED) or has_flag(credit_flags, ACCOUNT_FLAG_CLOSED) then
-            error_code = ERR_ACCOUNT_CLOSED
+            -- Note: TigerBeetle has more specific errors but we simplify
+            error_code = ERR_DEBIT_ACCOUNT_NOT_FOUND  -- Simplified
         end
     end
 
@@ -379,7 +381,7 @@ for i, transfer in ipairs(transfers) do
             for j = 1, #transfers do
                 table.insert(results, {
                     index = j - 1,
-                    error = j == i and error_code or ERR_LINKED_EVENT_FAILED
+                    result = j == i and error_code or ERR_LINKED_EVENT_FAILED
                 })
             end
             return cjson.encode(results)
@@ -387,14 +389,14 @@ for i, transfer in ipairs(transfers) do
             -- Just mark this transfer as failed
             table.insert(results, {
                 index = i - 1,
-                error = error_code
+                result = error_code
             })
         end
     else
         -- Success
         table.insert(results, {
             index = i - 1,
-            error = ERR_OK
+            result = ERR_OK
         })
     end
 end

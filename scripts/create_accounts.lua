@@ -3,21 +3,26 @@
 -- KEYS: none
 -- ARGV: JSON array of account objects
 
--- Error codes
+-- Error codes (matching TigerBeetle CreateAccountsResult)
 local ERR_OK = 0
-local ERR_ACCOUNT_EXISTS = 1
-local ERR_ACCOUNT_INVALID_ID = 3
-local ERR_ACCOUNT_INVALID_LEDGER = 4
-local ERR_ACCOUNT_INVALID_CODE = 5
-local ERR_ACCOUNT_BALANCES_NOT_ZERO = 7
-local ERR_LINKED_EVENT_FAILED = 22
+local ERR_LINKED_EVENT_FAILED = 1
+local ERR_ID_MUST_NOT_BE_ZERO = 6
+local ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE = 8
+local ERR_DEBITS_PENDING_MUST_BE_ZERO = 9
+local ERR_DEBITS_POSTED_MUST_BE_ZERO = 10
+local ERR_CREDITS_PENDING_MUST_BE_ZERO = 11
+local ERR_CREDITS_POSTED_MUST_BE_ZERO = 12
+local ERR_LEDGER_MUST_NOT_BE_ZERO = 13
+local ERR_CODE_MUST_NOT_BE_ZERO = 14
+local ERR_EXISTS = 21
 
--- Account flags
-local FLAG_LINKED = 1
-local FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 2
-local FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 4
-local FLAG_HISTORY = 8
-local FLAG_CLOSED = 16
+-- Account flags (matching TigerBeetle)
+local FLAG_LINKED = 0x0001                                  -- 1 << 0
+local FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 0x0002         -- 1 << 1
+local FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 0x0004         -- 1 << 2
+local FLAG_HISTORY = 0x0008                                 -- 1 << 3
+local FLAG_IMPORTED = 0x0010                                -- 1 << 4
+local FLAG_CLOSED = 0x0020                                  -- 1 << 5
 
 -- Check if a flag is set
 local function has_flag(flags, flag)
@@ -33,26 +38,38 @@ local all_success = true
 for i, account in ipairs(accounts) do
     local error_code = ERR_OK
 
-    -- Validate ID
+    -- Validate ID (id_must_not_be_zero)
     if not account.id or account.id == "" or account.id == "0" then
-        error_code = ERR_ACCOUNT_INVALID_ID
+        error_code = ERR_ID_MUST_NOT_BE_ZERO
     end
 
-    -- Validate ledger
+    -- Validate ledger (ledger_must_not_be_zero)
     if error_code == ERR_OK and (not account.ledger or account.ledger == 0) then
-        error_code = ERR_ACCOUNT_INVALID_LEDGER
+        error_code = ERR_LEDGER_MUST_NOT_BE_ZERO
     end
 
-    -- Validate code
+    -- Validate code (code_must_not_be_zero)
     if error_code == ERR_OK and (not account.code or account.code == 0) then
-        error_code = ERR_ACCOUNT_INVALID_CODE
+        error_code = ERR_CODE_MUST_NOT_BE_ZERO
+    end
+
+    -- Parse flags
+    local flags = tonumber(account.flags) or 0
+
+    -- Check for mutually exclusive flags (flags_are_mutually_exclusive)
+    if error_code == ERR_OK then
+        local has_debits_constraint = has_flag(flags, FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS)
+        local has_credits_constraint = has_flag(flags, FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS)
+        if has_debits_constraint and has_credits_constraint then
+            error_code = ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE
+        end
     end
 
     -- Check if account already exists
     if error_code == ERR_OK then
         local key = "account:" .. account.id
         if redis.call('EXISTS', key) == 1 then
-            error_code = ERR_ACCOUNT_EXISTS
+            error_code = ERR_EXISTS
         end
     end
 
@@ -63,16 +80,20 @@ for i, account in ipairs(accounts) do
         local credits_pending = tonumber(account.credits_pending) or 0
         local credits_posted = tonumber(account.credits_posted) or 0
 
-        if debits_pending ~= 0 or debits_posted ~= 0 or
-           credits_pending ~= 0 or credits_posted ~= 0 then
-            error_code = ERR_ACCOUNT_BALANCES_NOT_ZERO
+        if debits_pending ~= 0 then
+            error_code = ERR_DEBITS_PENDING_MUST_BE_ZERO
+        elseif debits_posted ~= 0 then
+            error_code = ERR_DEBITS_POSTED_MUST_BE_ZERO
+        elseif credits_pending ~= 0 then
+            error_code = ERR_CREDITS_PENDING_MUST_BE_ZERO
+        elseif credits_posted ~= 0 then
+            error_code = ERR_CREDITS_POSTED_MUST_BE_ZERO
         end
     end
 
     -- If this account has an error and is linked, fail all
     if error_code ~= ERR_OK then
         all_success = false
-        local flags = tonumber(account.flags) or 0
 
         if has_flag(flags, FLAG_LINKED) then
             -- Roll back all previously created accounts in this batch
@@ -86,7 +107,7 @@ for i, account in ipairs(accounts) do
             for j = 1, #accounts do
                 table.insert(results, {
                     index = j - 1,
-                    error = j == i and error_code or ERR_LINKED_EVENT_FAILED
+                    result = j == i and error_code or ERR_LINKED_EVENT_FAILED
                 })
             end
             return cjson.encode(results)
@@ -94,13 +115,12 @@ for i, account in ipairs(accounts) do
             -- Just mark this account as failed
             table.insert(results, {
                 index = i - 1,
-                error = error_code
+                result = error_code
             })
         end
     else
         -- Create the account
         local key = "account:" .. account.id
-        local flags = tonumber(account.flags) or 0
         local timestamp = redis.call('TIME')
         local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
 
@@ -122,7 +142,7 @@ for i, account in ipairs(accounts) do
         -- Success - no error to report
         table.insert(results, {
             index = i - 1,
-            error = ERR_OK
+            result = ERR_OK
         })
     end
 end
