@@ -197,13 +197,14 @@ func (r *RedisStressTest) RunWorker(ctx context.Context, workerID int, wg *sync.
 			r.metrics.TotalLatencyNs.Add(uint64(latency))
 
 			if err != nil {
-				r.metrics.OperationsFailed.Add(1)
+				// For batch operations, this counts the whole batch as failed
+				// Individual operation tracking is handled in performRead/performWrite
 				if r.config.Verbose {
 					fmt.Printf("Worker %d error: %v\n", workerID, err)
 				}
-			} else {
-				r.metrics.OperationsCompleted.Add(1)
 			}
+			// Note: OperationsCompleted is incremented in performRead/performWrite
+			// to accurately count individual operations, not batches
 		}
 	}
 }
@@ -231,6 +232,7 @@ func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenera
 		}
 
 		r.metrics.AccountsLookedup.Add(uint64(r.config.BatchSize))
+		r.metrics.OperationsCompleted.Add(uint64(r.config.BatchSize))
 	} else {
 		// Get account transfers
 		accountID := idGen.Next()
@@ -246,6 +248,7 @@ func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenera
 		}
 
 		r.metrics.AccountsLookedup.Add(1)
+		r.metrics.OperationsCompleted.Add(1)
 	}
 
 	return nil
@@ -312,6 +315,7 @@ func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counte
 	}
 
 	r.metrics.TransfersCreated.Add(uint64(successCount))
+	r.metrics.OperationsCompleted.Add(uint64(successCount))
 
 	return nil
 }

@@ -126,13 +126,13 @@ func (t *TigerBeetleStressTest) RunWorker(ctx context.Context, workerID int, wg 
 			t.metrics.TotalLatencyNs.Add(uint64(latency))
 
 			if err != nil {
-				t.metrics.OperationsFailed.Add(1)
+				// For batch operations, individual operation tracking is handled in performRead/performWrite
 				if t.config.Verbose {
 					fmt.Printf("Worker %d error: %v\n", workerID, err)
 				}
-			} else {
-				t.metrics.OperationsCompleted.Add(1)
 			}
+			// Note: OperationsCompleted is incremented in performRead/performWrite
+			// to accurately count individual operations, not batches
 		}
 	}
 }
@@ -151,6 +151,7 @@ func (t *TigerBeetleStressTest) performRead(ctx context.Context, idGen AccountID
 	}
 
 	t.metrics.AccountsLookedup.Add(uint64(t.config.BatchSize))
+	t.metrics.OperationsCompleted.Add(uint64(t.config.BatchSize))
 	return nil
 }
 
@@ -191,6 +192,7 @@ func (t *TigerBeetleStressTest) performWrite(ctx context.Context, workerID int, 
 	// Count successful transfers
 	successCount := t.config.BatchSize - len(results)
 	t.metrics.TransfersCreated.Add(uint64(successCount))
+	t.metrics.OperationsCompleted.Add(uint64(successCount))
 
 	// If there are errors, it doesn't necessarily mean the operation failed
 	// (could be validation errors for specific transfers)

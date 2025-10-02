@@ -1,3 +1,4 @@
 third_party/
 stress_test/stress_test
 tests/__pycache__/
+*.rdb
