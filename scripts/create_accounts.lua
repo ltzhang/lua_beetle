@@ -99,7 +99,7 @@ for i, account in ipairs(accounts) do
         chain_start = i
     end
 
-    -- Handle errors
+    -- Handle errors and success
     if error_code ~= ERR_OK then
         if chain_start ~= nil then
             -- We're in a linked chain - roll back the entire chain
@@ -126,7 +126,7 @@ for i, account in ipairs(accounts) do
                 result = error_code
             })
         end
-    else
+    elseif error_code == ERR_OK then
         -- Success - create the account
         local key = "account:" .. account.id
         local timestamp = redis.call('TIME')
@@ -147,16 +147,28 @@ for i, account in ipairs(accounts) do
             'timestamp', tostring(ts)
         )
 
-        -- Success - report it
-        table.insert(results, {
-            index = i - 1,
-            result = ERR_OK
-        })
-
-        -- If this account is NOT linked, the chain ends
+        -- If this account is NOT linked, report success and end chain
+        -- If it IS linked, don't report yet (wait for chain to complete)
         if not is_linked then
-            chain_start = nil
+            -- Chain ending or standalone account - report success for all
+            if chain_start ~= nil then
+                -- Ending a chain - report all accounts in chain
+                for j = chain_start, i do
+                    table.insert(results, {
+                        index = j - 1,
+                        result = ERR_OK
+                    })
+                end
+                chain_start = nil
+            else
+                -- Standalone account - just report this one
+                table.insert(results, {
+                    index = i - 1,
+                    result = ERR_OK
+                })
+            end
         end
+        -- If linked, don't report yet - continue the chain
     end
 end
 

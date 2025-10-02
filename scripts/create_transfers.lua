@@ -234,7 +234,7 @@ for i, transfer in ipairs(transfers) do
             local debit_total = debit_posted + debit_pending
             local credit_total = tonumber(debit_account.credits_posted) + tonumber(debit_account.credits_pending)
             if debit_total > credit_total then
-                error_code = ERR_TRANSFER_EXCEEDS_CREDITS
+                error_code = ERR_EXCEEDS_CREDITS
             end
         end
 
@@ -243,7 +243,7 @@ for i, transfer in ipairs(transfers) do
             local credit_total = credit_posted + credit_pending
             local debit_total = tonumber(credit_account.debits_posted) + tonumber(credit_account.debits_pending)
             if credit_total > debit_total then
-                error_code = ERR_TRANSFER_EXCEEDS_DEBITS
+                error_code = ERR_EXCEEDS_DEBITS
             end
         end
 
