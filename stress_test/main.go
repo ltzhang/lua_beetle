@@ -96,7 +96,7 @@ func main() {
 		}
 
 	case "both":
-		fmt.Println("Running both Redis and TigerBeetle tests for comparison...\n")
+		fmt.Println("Running both Redis and TigerBeetle tests for comparison...")
 
 		// Run Redis first
 		if err := runRedisTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
@@ -113,7 +113,7 @@ func main() {
 		}
 
 	case "all":
-		fmt.Println("Running Redis, DragonflyDB, and TigerBeetle tests for comparison...\n")
+		fmt.Println("Running Redis, DragonflyDB, and TigerBeetle tests for comparison...")
 
 		// Run Redis
 		if err := runRedisTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {

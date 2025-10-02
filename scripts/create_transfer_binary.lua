@@ -38,6 +38,15 @@ local function extract_16bytes(data, offset)
     return string.sub(data, offset, offset + 15)
 end
 
+-- Helper to convert 16-byte ID to hex string for Redis keys
+local function id_to_string(id_bytes)
+    local hex = ""
+    for i = 1, #id_bytes do
+        hex = hex .. string.format("%02x", string.byte(id_bytes, i))
+    end
+    return hex
+end
+
 -- Helper to extract and decode little-endian uint128
 local function decode_u128(data, offset)
     local result = 0
@@ -67,8 +76,19 @@ local function add_u128(a_data, a_offset, b_data, b_offset)
     return encode_u128(a_val + b_val)
 end
 
+-- Helper to subtract b from a (as binary strings)
+local function sub_u128(a_data, a_offset, b_data, b_offset)
+    local a_val = decode_u128(a_data, a_offset)
+    local b_val = decode_u128(b_data, b_offset)
+    if a_val < b_val then
+        return nil -- Underflow
+    end
+    return encode_u128(a_val - b_val)
+end
+
 -- Extract fields from transfer
-local transfer_id = extract_16bytes(transfer_data, 1)
+local transfer_id_raw = extract_16bytes(transfer_data, 1)
+local transfer_id = id_to_string(transfer_id_raw)
 local debit_account_id = extract_16bytes(transfer_data, 17)
 local credit_account_id = extract_16bytes(transfer_data, 33)
 local amount_bytes = extract_16bytes(transfer_data, 49)
@@ -123,11 +143,59 @@ local is_pending = (math.floor(flags / FLAG_PENDING) % 2) == 1
 local is_post = (math.floor(flags / FLAG_POST_PENDING) % 2) == 1
 local is_void = (math.floor(flags / FLAG_VOID_PENDING) % 2) == 1
 
+-- Extract pending_id (offset 64, 16 bytes)
+local pending_id_raw = extract_16bytes(transfer_data, 65)
+local pending_id = id_to_string(pending_id_raw)
+
 -- Update account balances
 local new_debit_account = debit_account
 local new_credit_account = credit_account
 
-if is_pending then
+if is_post or is_void then
+    -- Two-phase transfer resolution: lookup the pending transfer
+    if pending_id == "00000000000000000000000000000000" then
+        return string.char(33) .. string.rep('\0', 127) -- ERR_PENDING_ID_REQUIRED
+    end
+
+    local pending_transfer_key = "transfer:" .. pending_id
+    local pending_transfer = redis.call('GET', pending_transfer_key)
+    if not pending_transfer then
+        return string.char(34) .. string.rep('\0', 127) -- ERR_PENDING_TRANSFER_NOT_FOUND
+    end
+
+    -- Extract pending transfer details
+    local pending_flags = string.byte(pending_transfer, 119) + string.byte(pending_transfer, 120) * 256
+    local pending_is_pending = (math.floor(pending_flags / FLAG_PENDING) % 2) == 1
+
+    if not pending_is_pending then
+        return string.char(35) .. string.rep('\0', 127) -- ERR_PENDING_TRANSFER_NOT_PENDING
+    end
+
+    -- Get pending transfer amount
+    local pending_amount_bytes = extract_16bytes(pending_transfer, 49)
+
+    if is_post then
+        -- POST_PENDING_TRANSFER: move from pending to posted
+        -- Reduce pending balances
+        local debit_pending = sub_u128(debit_account, 17, pending_amount_bytes, 1)
+        local credit_pending = sub_u128(credit_account, 49, pending_amount_bytes, 1)
+
+        -- Increase posted balances
+        local debit_posted = add_u128(debit_account, 33, pending_amount_bytes, 1)
+        local credit_posted = add_u128(credit_account, 65, pending_amount_bytes, 1)
+
+        new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. debit_posted .. string.sub(debit_account, 49, 128)
+        new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. credit_posted .. string.sub(credit_account, 81, 128)
+    elseif is_void then
+        -- VOID_PENDING_TRANSFER: return funds by reducing pending balances
+        local debit_pending = sub_u128(debit_account, 17, pending_amount_bytes, 1)
+        local credit_pending = sub_u128(credit_account, 49, pending_amount_bytes, 1)
+
+        new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. string.sub(debit_account, 33, 128)
+        new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
+    end
+elseif is_pending then
+    -- Phase 1: Create pending transfer
     -- Update debits_pending (offset 16) and credits_pending (offset 48)
     local debit_pending = add_u128(debit_account, 17, amount_bytes, 1)
     local credit_pending = add_u128(credit_account, 49, amount_bytes, 1)

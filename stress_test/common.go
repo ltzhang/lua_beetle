@@ -148,6 +148,7 @@ func RandomAmount(rng *rand.Rand) uint64 {
 type Encoder interface {
 	EncodeAccount(id uint64, ledger uint32, code uint16, flags uint16) (interface{}, error)
 	EncodeTransfer(id string, debitAccountID, creditAccountID uint64, amount uint64, ledger uint32, code uint16, flags uint16) (interface{}, error)
+	EncodeTransferWithPending(id string, debitAccountID, creditAccountID uint64, amount uint64, pendingID string, ledger uint32, code uint16, flags uint16) (interface{}, error)
 	DecodeAccountID(data interface{}) string
 	DecodeTransferResult(data interface{}) (uint8, error)
 }
@@ -175,6 +176,20 @@ func (e *JSONEncoder) EncodeTransfer(id string, debitAccountID, creditAccountID 
 		"debit_account_id":  fmt.Sprintf("%d", debitAccountID),
 		"credit_account_id": fmt.Sprintf("%d", creditAccountID),
 		"amount":            amount,
+		"ledger":            ledger,
+		"code":              code,
+		"flags":             flags,
+	}
+	return json.Marshal(transfer)
+}
+
+func (e *JSONEncoder) EncodeTransferWithPending(id string, debitAccountID, creditAccountID uint64, amount uint64, pendingID string, ledger uint32, code uint16, flags uint16) (interface{}, error) {
+	transfer := map[string]interface{}{
+		"id":                id,
+		"debit_account_id":  fmt.Sprintf("%d", debitAccountID),
+		"credit_account_id": fmt.Sprintf("%d", creditAccountID),
+		"amount":            amount,
+		"pending_id":        pendingID,
 		"ledger":            ledger,
 		"code":              code,
 		"flags":             flags,
@@ -307,6 +322,49 @@ func (e *BinaryEncoder) EncodeTransfer(id string, debitAccountID, creditAccountI
 	return buf, nil
 }
 
+func (e *BinaryEncoder) EncodeTransferWithPending(id string, debitAccountID, creditAccountID uint64, amount uint64, pendingID string, ledger uint32, code uint16, flags uint16) (interface{}, error) {
+	// Transfer binary layout: 128 bytes
+	buf := make([]byte, 128)
+
+	// Parse ID strings to uint64
+	transferID := hashStringToU64(id)
+	pendingIDU64 := hashStringToU64(pendingID)
+
+	// id: 16 bytes (offset 0)
+	copy(buf[0:16], encodeU128(transferID))
+
+	// debit_account_id: 16 bytes (offset 16)
+	copy(buf[16:32], encodeU128(debitAccountID))
+
+	// credit_account_id: 16 bytes (offset 32)
+	copy(buf[32:48], encodeU128(creditAccountID))
+
+	// amount: 16 bytes (offset 48)
+	copy(buf[48:64], encodeU128(amount))
+
+	// pending_id: 16 bytes (offset 64)
+	copy(buf[64:80], encodeU128(pendingIDU64))
+
+	// user_data_128: 16 bytes (offset 80) - zero
+	// user_data_64: 8 bytes (offset 96) - zero
+	// user_data_32: 4 bytes (offset 104) - zero
+
+	// timeout: 4 bytes (offset 108) - zero
+
+	// ledger: 4 bytes (offset 112)
+	copy(buf[112:116], encodeU32(ledger))
+
+	// code: 2 bytes (offset 116)
+	copy(buf[116:118], encodeU16(code))
+
+	// flags: 2 bytes (offset 118)
+	copy(buf[118:120], encodeU16(flags))
+
+	// timestamp: 8 bytes (offset 120) - will be set by server
+
+	return buf, nil
+}
+
 func (e *BinaryEncoder) DecodeAccountID(data interface{}) string {
 	buf, ok := data.([]byte)
 	if !ok || len(buf) < 16 {
@@ -339,11 +397,8 @@ func (e *BinaryEncoder) DecodeTransferResult(data interface{}) (uint8, error) {
 // Simple hash function to convert string ID to uint64
 func hashStringToU64(s string) uint64 {
 	hash := uint64(0)
-	for i, c := range s {
+	for _, c := range s {
 		hash = hash*31 + uint64(c)
-		if i > 8 {
-			break
-		}
 	}
 	return hash
 }

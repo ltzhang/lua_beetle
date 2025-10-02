@@ -1,5 +1,5 @@
 third_party/*
 !third_party/tigerbeetle-benchmarks/
-stress_test/stress_test
+stress_test/*_test
 tests/__pycache__/
 *.rdb
