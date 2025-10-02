@@ -12,11 +12,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RedisStressTest implements stress testing for Lua Beetle on Redis
+// RedisStressTest implements stress testing for Lua Beetle on Redis/DragonflyDB
 type RedisStressTest struct {
 	client                   *redis.Client
 	config                   *StressTestConfig
 	metrics                  *TestMetrics
+	name                     string
 	createAccountsSHA        string
 	createTransfersSHA       string
 	lookupAccountsSHA        string
@@ -24,23 +25,24 @@ type RedisStressTest struct {
 	getAccountBalancesSHA    string
 }
 
-// NewRedisStressTest creates a new Redis stress tester
-func NewRedisStressTest(config *StressTestConfig) (*RedisStressTest, error) {
+// NewRedisStressTest creates a new Redis-compatible stress tester
+func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*RedisStressTest, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
+		Addr:     addr,
 		Password: "",
 		DB:       0,
 	})
 
 	ctx := context.Background()
 	if err := client.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
+		return nil, fmt.Errorf("failed to connect to %s: %w", name, err)
 	}
 
 	test := &RedisStressTest{
 		client:  client,
 		config:  config,
 		metrics: &TestMetrics{},
+		name:    name,
 	}
 
 	// Load Lua scripts
@@ -283,7 +285,7 @@ func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counte
 
 // Run executes the stress test
 func (r *RedisStressTest) Run(ctx context.Context) error {
-	fmt.Printf("\n=== Starting Redis Stress Test ===\n")
+	fmt.Printf("\n=== Starting %s Stress Test ===\n", r.name)
 	fmt.Printf("Workers: %d\n", r.config.NumWorkers)
 	fmt.Printf("Duration: %d seconds\n", r.config.Duration)
 	fmt.Printf("Read Ratio: %.2f\n", r.config.ReadRatio)
@@ -314,7 +316,7 @@ func (r *RedisStressTest) Run(ctx context.Context) error {
 	r.metrics.EndTime = time.Now()
 
 	// Print results
-	PrintMetrics(r.metrics, "Redis (Lua Beetle)")
+	PrintMetrics(r.metrics, r.name+" (Lua Beetle)")
 
 	return nil
 }

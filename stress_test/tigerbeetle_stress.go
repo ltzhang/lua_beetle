@@ -20,7 +20,9 @@ type TigerBeetleStressTest struct {
 
 // NewTigerBeetleStressTest creates a new TigerBeetle stress tester
 func NewTigerBeetleStressTest(config *StressTestConfig, addresses []string) (*TigerBeetleStressTest, error) {
-	client, err := tb.NewClient(0, addresses, 32)
+	// Use cluster ID 0 for testing
+	clusterID := types.ToUint128(0)
+	client, err := tb.NewClient(clusterID, addresses)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TigerBeetle client: %w", err)
 	}
@@ -37,7 +39,9 @@ func (t *TigerBeetleStressTest) Setup(ctx context.Context) error {
 	fmt.Printf("Creating %d accounts...\n", t.config.NumAccounts)
 
 	// Create accounts in batches
-	batchSize := 8000 // TigerBeetle max batch size is 8191
+	// TigerBeetle has a message size limit, accounts are 128 bytes each
+	// Max message is ~1MB, so max accounts per batch is ~8000
+	batchSize := 100 // Start with small batch for testing
 	for i := 0; i < t.config.NumAccounts; i += batchSize {
 		end := i + batchSize
 		if end > t.config.NumAccounts {
@@ -47,7 +51,7 @@ func (t *TigerBeetleStressTest) Setup(ctx context.Context) error {
 		accounts := make([]types.Account, end-i)
 		for j := i; j < end; j++ {
 			accounts[j-i] = types.Account{
-				ID:     types.ID(types.ToUint128(uint64(j + 1))),
+				ID:     types.ToUint128(uint64(j + 1)),
 				Ledger: t.config.LedgerID,
 				Code:   10,
 				Flags:  0,

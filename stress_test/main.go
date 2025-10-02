@@ -10,7 +10,7 @@ import (
 
 func main() {
 	// Command line flags
-	mode := flag.String("mode", "redis", "Test mode: redis, tigerbeetle, or both")
+	mode := flag.String("mode", "redis", "Test mode: redis, dragonfly, tigerbeetle, or all")
 	numAccounts := flag.Int("accounts", 10000, "Number of accounts to create")
 	numWorkers := flag.Int("workers", 10, "Number of concurrent workers")
 	duration := flag.Int("duration", 60, "Test duration in seconds")
@@ -76,8 +76,14 @@ func main() {
 	// Run tests based on mode
 	switch strings.ToLower(*mode) {
 	case "redis":
-		if err := runRedisTest(ctx, config, *noCleanup); err != nil {
+		if err := runRedisTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "Redis test failed: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "dragonfly":
+		if err := runRedisTest(ctx, config, "localhost:6380", "DragonflyDB", *noCleanup); err != nil {
+			fmt.Fprintf(os.Stderr, "DragonflyDB test failed: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -91,7 +97,7 @@ func main() {
 		fmt.Println("Running both Redis and TigerBeetle tests for comparison...\n")
 
 		// Run Redis first
-		if err := runRedisTest(ctx, config, *noCleanup); err != nil {
+		if err := runRedisTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "Redis test failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -104,16 +110,41 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "all":
+		fmt.Println("Running Redis, DragonflyDB, and TigerBeetle tests for comparison...\n")
+
+		// Run Redis
+		if err := runRedisTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
+			fmt.Fprintf(os.Stderr, "Redis test failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("\n" + strings.Repeat("=", 60) + "\n")
+
+		// Run DragonflyDB
+		if err := runRedisTest(ctx, config, "localhost:6380", "DragonflyDB", *noCleanup); err != nil {
+			fmt.Fprintf(os.Stderr, "DragonflyDB test failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("\n" + strings.Repeat("=", 60) + "\n")
+
+		// Run TigerBeetle
+		if err := runTigerBeetleTest(ctx, config, *tbAddress, *noCleanup); err != nil {
+			fmt.Fprintf(os.Stderr, "TigerBeetle test failed: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
-		fmt.Fprintf(os.Stderr, "Error: invalid mode '%s'. Must be 'redis', 'tigerbeetle', or 'both'\n", *mode)
+		fmt.Fprintf(os.Stderr, "Error: invalid mode '%s'. Must be 'redis', 'dragonfly', 'tigerbeetle', 'both', or 'all'\n", *mode)
 		os.Exit(1)
 	}
 
 	fmt.Println("\n✅ Stress test completed successfully!")
 }
 
-func runRedisTest(ctx context.Context, config *StressTestConfig, noCleanup bool) error {
-	test, err := NewRedisStressTest(config)
+func runRedisTest(ctx context.Context, config *StressTestConfig, addr string, name string, noCleanup bool) error {
+	test, err := NewRedisStressTest(config, addr, name)
 	if err != nil {
 		return err
 	}
@@ -124,7 +155,7 @@ func runRedisTest(ctx context.Context, config *StressTestConfig, noCleanup bool)
 	}
 
 	if !noCleanup {
-		fmt.Println("\nCleaning up Redis data...")
+		fmt.Printf("\nCleaning up %s data...\n", name)
 		if err := test.Cleanup(ctx); err != nil {
 			return fmt.Errorf("cleanup failed: %w", err)
 		}
