@@ -18,9 +18,9 @@ type RedisStressTest struct {
 	config                   *StressTestConfig
 	metrics                  *TestMetrics
 	name                     string
-	createAccountsSHA        string
-	createTransfersSHA       string
-	lookupAccountsSHA        string
+	createAccountSHA         string
+	createTransferSHA        string
+	lookupAccountSHA         string
 	getAccountTransfersSHA   string
 	getAccountBalancesSHA    string
 }
@@ -53,12 +53,12 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 	return test, nil
 }
 
-// loadScripts loads all Lua scripts into Redis
+// loadScripts loads all Lua scripts into DragonflyDB
 func (r *RedisStressTest) loadScripts(ctx context.Context) error {
 	scripts := map[string]*string{
-		"../scripts/create_accounts.lua":        &r.createAccountsSHA,
-		"../scripts/create_transfers.lua":       &r.createTransfersSHA,
-		"../scripts/lookup_accounts.lua":        &r.lookupAccountsSHA,
+		"../scripts/create_account.lua":         &r.createAccountSHA,
+		"../scripts/create_transfer.lua":        &r.createTransferSHA,
+		"../scripts/lookup_account.lua":         &r.lookupAccountSHA,
 		"../scripts/get_account_transfers.lua":  &r.getAccountTransfersSHA,
 		"../scripts/get_account_balances.lua":   &r.getAccountBalancesSHA,
 	}
@@ -83,52 +83,59 @@ func (r *RedisStressTest) loadScripts(ctx context.Context) error {
 	return nil
 }
 
-// Setup creates initial accounts
+// Setup creates initial accounts using pipelining
 func (r *RedisStressTest) Setup(ctx context.Context) error {
 	fmt.Printf("Creating %d accounts...\n", r.config.NumAccounts)
 
-	// Create accounts in batches
-	batchSize := 1000
-	for i := 0; i < r.config.NumAccounts; i += batchSize {
-		end := i + batchSize
+	// Create accounts using pipelines (batching for performance, not transactions)
+	pipelineSize := 1000
+	for i := 0; i < r.config.NumAccounts; i += pipelineSize {
+		end := i + pipelineSize
 		if end > r.config.NumAccounts {
 			end = r.config.NumAccounts
 		}
 
-		accounts := make([]map[string]interface{}, end-i)
+		pipe := r.client.Pipeline()
 		for j := i; j < end; j++ {
-			accounts[j-i] = map[string]interface{}{
+			account := map[string]interface{}{
 				"id":     fmt.Sprintf("%d", j+1),
 				"ledger": r.config.LedgerID,
 				"code":   10,
 				"flags":  0,
 			}
+
+			accountJSON, err := json.Marshal(account)
+			if err != nil {
+				return fmt.Errorf("failed to marshal account: %w", err)
+			}
+
+			pipe.EvalSha(ctx, r.createAccountSHA, []string{}, accountJSON)
 		}
 
-		accountsJSON, err := json.Marshal(accounts)
+		// Execute pipeline
+		results, err := pipe.Exec(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to marshal accounts: %w", err)
-		}
-
-		result, err := r.client.EvalSha(ctx, r.createAccountsSHA, []string{}, accountsJSON).Result()
-		if err != nil {
-			return fmt.Errorf("failed to create accounts: %w", err)
+			return fmt.Errorf("failed to execute pipeline: %w", err)
 		}
 
 		// Check for errors
-		var results []map[string]interface{}
-		if err := json.Unmarshal([]byte(result.(string)), &results); err != nil {
-			return fmt.Errorf("failed to unmarshal results: %w", err)
-		}
+		for idx, result := range results {
+			if result.Err() != nil {
+				return fmt.Errorf("account %d creation failed: %w", i+idx+1, result.Err())
+			}
 
-		for _, res := range results {
-			if errCode := res["result"].(float64); errCode != 0 {
-				return fmt.Errorf("account creation failed with result code: %v", errCode)
+			var resultObj map[string]interface{}
+			if err := json.Unmarshal([]byte(result.(*redis.Cmd).Val().(string)), &resultObj); err != nil {
+				return fmt.Errorf("failed to unmarshal result: %w", err)
+			}
+
+			if errCode := resultObj["result"].(float64); errCode != 0 {
+				return fmt.Errorf("account %d creation failed with result code: %v", i+idx+1, errCode)
 			}
 		}
 
-		if r.config.Verbose && (i+batchSize)%5000 == 0 {
-			fmt.Printf("Created %d accounts...\n", i+batchSize)
+		if r.config.Verbose && end%5000 == 0 {
+			fmt.Printf("Created %d accounts...\n", end)
 		}
 	}
 
@@ -194,22 +201,18 @@ func (r *RedisStressTest) RunWorker(ctx context.Context, workerID int, wg *sync.
 	}
 }
 
-// performRead performs a read operation (lookup or get transfers)
+// performRead performs a read operation (lookup or get transfers) using pipelining
 func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenerator, rng *rand.Rand) error {
 	// Choose between lookup account or get account transfers
 	if rng.Float64() < 0.5 {
-		// Lookup accounts
-		accountIDs := make([]string, r.config.BatchSize)
+		// Lookup accounts using pipeline
+		pipe := r.client.Pipeline()
 		for i := 0; i < r.config.BatchSize; i++ {
-			accountIDs[i] = fmt.Sprintf("%d", idGen.Next())
+			accountID := fmt.Sprintf("%d", idGen.Next())
+			pipe.EvalSha(ctx, r.lookupAccountSHA, []string{}, accountID)
 		}
 
-		accountIDsJSON, err := json.Marshal(accountIDs)
-		if err != nil {
-			return err
-		}
-
-		_, err = r.client.EvalSha(ctx, r.lookupAccountsSHA, []string{}, accountIDsJSON).Result()
+		_, err := pipe.Exec(ctx)
 		if err != nil {
 			return err
 		}
@@ -229,22 +232,33 @@ func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenera
 	return nil
 }
 
-// performWrite performs a write operation (create transfers)
+// performWrite performs a write operation (create transfers) using pipelining
 func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counter *uint64, idGen AccountIDGenerator, rng *rand.Rand) error {
-	// Create a batch of transfers
-	transfers := make([]map[string]interface{}, r.config.BatchSize)
+	// Create transfers using pipeline (each transfer is independent)
+	pipe := r.client.Pipeline()
 
 	for i := 0; i < r.config.BatchSize; i++ {
 		*counter++
 		debitAccountID := idGen.Next()
 		creditAccountID := idGen.Next()
 
-		// Ensure different accounts
-		for creditAccountID == debitAccountID {
+		// Client-side check: Ensure different accounts
+		// This prevents wasting Redis operations on invalid transfers
+		// Server-side validation remains for correctness
+		attempts := 0
+		maxAttempts := 100 // Prevent infinite loop with extreme skew
+		for creditAccountID == debitAccountID && attempts < maxAttempts {
 			creditAccountID = idGen.Next()
+			attempts++
 		}
 
-		transfers[i] = map[string]interface{}{
+		// Skip this transfer if we couldn't find different accounts
+		// (This only happens with extreme skew where same account dominates)
+		if creditAccountID == debitAccountID {
+			continue
+		}
+
+		transfer := map[string]interface{}{
 			"id":                GenerateTransferID(workerID, *counter),
 			"debit_account_id":  fmt.Sprintf("%d", debitAccountID),
 			"credit_account_id": fmt.Sprintf("%d", creditAccountID),
@@ -253,27 +267,34 @@ func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counte
 			"code":              10,
 			"flags":             0,
 		}
+
+		transferJSON, err := json.Marshal(transfer)
+		if err != nil {
+			return err
+		}
+
+		pipe.EvalSha(ctx, r.createTransferSHA, []string{}, transferJSON)
 	}
 
-	transfersJSON, err := json.Marshal(transfers)
+	// Execute pipeline
+	results, err := pipe.Exec(ctx)
 	if err != nil {
 		return err
 	}
 
-	result, err := r.client.EvalSha(ctx, r.createTransfersSHA, []string{}, transfersJSON).Result()
-	if err != nil {
-		return err
-	}
-
-	// Check for errors
-	var results []map[string]interface{}
-	if err := json.Unmarshal([]byte(result.(string)), &results); err != nil {
-		return err
-	}
-
+	// Check for errors and count successes
 	successCount := 0
-	for _, res := range results {
-		if errCode := res["result"].(float64); errCode == 0 {
+	for _, result := range results {
+		if result.Err() != nil {
+			continue
+		}
+
+		var resultObj map[string]interface{}
+		if err := json.Unmarshal([]byte(result.(*redis.Cmd).Val().(string)), &resultObj); err != nil {
+			continue
+		}
+
+		if errCode := resultObj["result"].(float64); errCode == 0 {
 			successCount++
 		}
 	}

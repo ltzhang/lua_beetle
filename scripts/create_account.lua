@@ -1,0 +1,120 @@
+-- Create Account Script (Single Operation)
+-- Redis Lua script to create a single account with TigerBeetle semantics
+-- KEYS: none
+-- ARGV[1]: JSON object representing the account
+
+-- Error codes (matching TigerBeetle CreateAccountsResult)
+local ERR_OK = 0
+local ERR_LINKED_EVENT_FAILED = 1
+local ERR_LINKED_EVENT_CHAIN_OPEN = 2
+local ERR_ID_MUST_NOT_BE_ZERO = 6
+local ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE = 8
+local ERR_DEBITS_PENDING_MUST_BE_ZERO = 9
+local ERR_DEBITS_POSTED_MUST_BE_ZERO = 10
+local ERR_CREDITS_PENDING_MUST_BE_ZERO = 11
+local ERR_CREDITS_POSTED_MUST_BE_ZERO = 12
+local ERR_LEDGER_MUST_NOT_BE_ZERO = 13
+local ERR_CODE_MUST_NOT_BE_ZERO = 14
+local ERR_EXISTS = 21
+
+-- Account flags (matching TigerBeetle)
+local FLAG_LINKED = 0x0001
+local FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 0x0002
+local FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 0x0004
+local FLAG_HISTORY = 0x0008
+local FLAG_IMPORTED = 0x0010
+local FLAG_CLOSED = 0x0020
+
+-- Check if a flag is set
+local function has_flag(flags, flag)
+    return (flags % (flag * 2)) >= flag
+end
+
+-- Parse account from JSON
+local account = cjson.decode(ARGV[1])
+local error_code = ERR_OK
+
+-- Validate ID (id_must_not_be_zero)
+if not account.id or account.id == "" or account.id == "0" then
+    error_code = ERR_ID_MUST_NOT_BE_ZERO
+end
+
+-- Validate ledger (ledger_must_not_be_zero)
+if error_code == ERR_OK and (not account.ledger or account.ledger == 0) then
+    error_code = ERR_LEDGER_MUST_NOT_BE_ZERO
+end
+
+-- Validate code (code_must_not_be_zero)
+if error_code == ERR_OK and (not account.code or account.code == 0) then
+    error_code = ERR_CODE_MUST_NOT_BE_ZERO
+end
+
+-- Parse flags
+local flags = tonumber(account.flags) or 0
+
+-- Check for mutually exclusive flags (flags_are_mutually_exclusive)
+if error_code == ERR_OK then
+    local has_debits_constraint = has_flag(flags, FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS)
+    local has_credits_constraint = has_flag(flags, FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS)
+    if has_debits_constraint and has_credits_constraint then
+        error_code = ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE
+    end
+end
+
+-- Check if account already exists
+if error_code == ERR_OK then
+    local key = "account:" .. account.id
+    if redis.call('EXISTS', key) == 1 then
+        error_code = ERR_EXISTS
+    end
+end
+
+-- Validate balances are zero (for new accounts)
+if error_code == ERR_OK then
+    local debits_pending = tonumber(account.debits_pending) or 0
+    local debits_posted = tonumber(account.debits_posted) or 0
+    local credits_pending = tonumber(account.credits_pending) or 0
+    local credits_posted = tonumber(account.credits_posted) or 0
+
+    if debits_pending ~= 0 then
+        error_code = ERR_DEBITS_PENDING_MUST_BE_ZERO
+    elseif debits_posted ~= 0 then
+        error_code = ERR_DEBITS_POSTED_MUST_BE_ZERO
+    elseif credits_pending ~= 0 then
+        error_code = ERR_CREDITS_PENDING_MUST_BE_ZERO
+    elseif credits_posted ~= 0 then
+        error_code = ERR_CREDITS_POSTED_MUST_BE_ZERO
+    end
+end
+
+-- Single operations should not have the LINKED flag set
+if error_code == ERR_OK and has_flag(flags, FLAG_LINKED) then
+    error_code = ERR_LINKED_EVENT_CHAIN_OPEN
+end
+
+-- If there's an error, return it
+if error_code ~= ERR_OK then
+    return cjson.encode({result = error_code})
+end
+
+-- Create the account
+local key = "account:" .. account.id
+local timestamp = redis.call('TIME')
+local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+
+redis.call('HSET', key,
+    'id', account.id,
+    'debits_pending', '0',
+    'debits_posted', '0',
+    'credits_pending', '0',
+    'credits_posted', '0',
+    'user_data_128', account.user_data_128 or '',
+    'user_data_64', account.user_data_64 or '',
+    'user_data_32', account.user_data_32 or '',
+    'ledger', tostring(account.ledger),
+    'code', tostring(account.code),
+    'flags', tostring(flags),
+    'timestamp', tostring(ts)
+)
+
+return cjson.encode({result = ERR_OK})
