@@ -59,13 +59,12 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 
 // loadScripts loads all Lua scripts into Redis/DragonflyDB
 func (r *RedisStressTest) loadScripts(ctx context.Context) error {
-	// Only binary encoding is supported
 	scripts := map[string]*string{
-		"../scripts/create_account_binary.lua":        &r.createAccountSHA,
-		"../scripts/create_transfer_binary.lua":       &r.createTransferSHA,
-		"../scripts/lookup_account_binary.lua":        &r.lookupAccountSHA,
-		"../scripts/get_account_transfers_binary.lua": &r.getAccountTransfersSHA,
-		"../scripts/get_account_balances_binary.lua":  &r.getAccountBalancesSHA,
+		"../scripts/create_account.lua":        &r.createAccountSHA,
+		"../scripts/create_transfer.lua":       &r.createTransferSHA,
+		"../scripts/lookup_account.lua":        &r.lookupAccountSHA,
+		"../scripts/get_account_transfers.lua": &r.getAccountTransfersSHA,
+		"../scripts/get_account_balances.lua":  &r.getAccountBalancesSHA,
 	}
 
 	for path, shaPtr := range scripts {

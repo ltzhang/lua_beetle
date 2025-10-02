@@ -26,9 +26,9 @@ func BenchmarkBasicLuaBeetleParallel(b *testing.B) {
 
 	encoder := NewBinaryEncoder()
 
-	createAccountScript := mustLoadScriptParallel(client, "../scripts/create_account_binary.lua")
-	createTransferScript := mustLoadScriptParallel(client, "../scripts/create_transfer_binary.lua")
-	lookupAccountScript := mustLoadScriptParallel(client, "../scripts/lookup_account_binary.lua")
+	createAccountScript := mustLoadScriptParallel(client, "../scripts/create_account.lua")
+	createTransferScript := mustLoadScriptParallel(client, "../scripts/create_transfer.lua")
+	lookupAccountScript := mustLoadScriptParallel(client, "../scripts/lookup_account.lua")
 
 	var accountID1 uint64 = 101
 	var accountID2 uint64 = 102
@@ -113,9 +113,9 @@ func BenchmarkBasicBatchLuaBeetleParallel(b *testing.B) {
 
 	encoder := NewBinaryEncoder()
 
-	createAccountScript := mustLoadScriptParallel(client, "../scripts/create_account_binary.lua")
-	createTransferScript := mustLoadScriptParallel(client, "../scripts/create_transfer_binary.lua")
-	lookupAccountScript := mustLoadScriptParallel(client, "../scripts/lookup_account_binary.lua")
+	createAccountScript := mustLoadScriptParallel(client, "../scripts/create_account.lua")
+	createTransferScript := mustLoadScriptParallel(client, "../scripts/create_transfer.lua")
+	lookupAccountScript := mustLoadScriptParallel(client, "../scripts/lookup_account.lua")
 
 	var accountID1 uint64 = 103
 	var accountID2 uint64 = 104

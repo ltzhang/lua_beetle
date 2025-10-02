@@ -29,9 +29,9 @@ func BenchmarkBasicLuaBeetle(b *testing.B) {
 	encoder := NewBinaryEncoder()
 
 	// Load scripts
-	createAccountScript := mustLoadScript(client, "../scripts/create_account_binary.lua")
-	createTransferScript := mustLoadScript(client, "../scripts/create_transfer_binary.lua")
-	lookupAccountScript := mustLoadScript(client, "../scripts/lookup_account_binary.lua")
+	createAccountScript := mustLoadScript(client, "../scripts/create_account.lua")
+	createTransferScript := mustLoadScript(client, "../scripts/create_transfer.lua")
+	lookupAccountScript := mustLoadScript(client, "../scripts/lookup_account.lua")
 
 	var accountID1 uint64 = 1
 	var accountID2 uint64 = 2
@@ -109,9 +109,9 @@ func BenchmarkBasicBatchLuaBeetle(b *testing.B) {
 
 	encoder := NewBinaryEncoder()
 
-	createAccountScript := mustLoadScript(client, "../scripts/create_account_binary.lua")
-	createTransferScript := mustLoadScript(client, "../scripts/create_transfer_binary.lua")
-	lookupAccountScript := mustLoadScript(client, "../scripts/lookup_account_binary.lua")
+	createAccountScript := mustLoadScript(client, "../scripts/create_account.lua")
+	createTransferScript := mustLoadScript(client, "../scripts/create_transfer.lua")
+	lookupAccountScript := mustLoadScript(client, "../scripts/lookup_account.lua")
 
 	var accountID1 uint64 = 5
 	var accountID2 uint64 = 6

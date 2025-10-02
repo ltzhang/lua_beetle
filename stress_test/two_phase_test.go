@@ -18,9 +18,9 @@ func TestTwoPhaseTransfer(t *testing.T) {
 	encoder := NewBinaryEncoder()
 
 	// Load scripts
-	createAccountScript := mustLoadScriptTwoPhase(client, "../scripts/create_account_binary.lua")
-	createTransferScript := mustLoadScriptTwoPhase(client, "../scripts/create_transfer_binary.lua")
-	lookupAccountScript := mustLoadScriptTwoPhase(client, "../scripts/lookup_account_binary.lua")
+	createAccountScript := mustLoadScriptTwoPhase(client, "../scripts/create_account.lua")
+	createTransferScript := mustLoadScriptTwoPhase(client, "../scripts/create_transfer.lua")
+	lookupAccountScript := mustLoadScriptTwoPhase(client, "../scripts/lookup_account.lua")
 
 	var accountID1 uint64 = 201
 	var accountID2 uint64 = 202
@@ -142,9 +142,9 @@ func TestVoidPendingTransfer(t *testing.T) {
 
 	encoder := NewBinaryEncoder()
 
-	createAccountScript := mustLoadScriptTwoPhase(client, "../scripts/create_account_binary.lua")
-	createTransferScript := mustLoadScriptTwoPhase(client, "../scripts/create_transfer_binary.lua")
-	lookupAccountScript := mustLoadScriptTwoPhase(client, "../scripts/lookup_account_binary.lua")
+	createAccountScript := mustLoadScriptTwoPhase(client, "../scripts/create_account.lua")
+	createTransferScript := mustLoadScriptTwoPhase(client, "../scripts/create_transfer.lua")
+	lookupAccountScript := mustLoadScriptTwoPhase(client, "../scripts/lookup_account.lua")
 
 	var accountID1 uint64 = 203
 	var accountID2 uint64 = 204
