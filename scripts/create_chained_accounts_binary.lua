@@ -31,7 +31,7 @@ local results = {}
 local chain_start = nil
 local created_accounts = {}
 
--- Get timestamp once for all accounts
+-- Get timestamp once for all accounts (will be used for non-imported accounts)
 local timestamp = redis.call('TIME')
 local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
 local ts_bytes = string.char(
@@ -45,6 +45,8 @@ local ts_bytes = string.char(
     math.floor(ts / 72057594037927936) % 256
 )
 
+local IMPORTED_FLAG = 0x0002
+
 for i = 0, num_accounts - 1 do
     local offset = i * 128 + 1
     local account_data = string.sub(accounts_data, offset, offset + 127)
@@ -53,6 +55,7 @@ for i = 0, num_accounts - 1 do
     local id = string.sub(account_data, 1, 16)
     local flags = string.byte(account_data, 119) + string.byte(account_data, 120) * 256
     local is_linked = (flags % 2) == 1  -- LINKED flag is 0x0001
+    local is_imported = (flags % 4) >= 2  -- IMPORTED flag is 0x0002
 
     local error_code = 0
     local key = "account:" .. id
@@ -93,7 +96,15 @@ for i = 0, num_accounts - 1 do
         end
     else
         -- Success - create account with timestamp
-        local account_with_ts = string.sub(account_data, 1, 120) .. ts_bytes
+        local account_with_ts
+        if is_imported then
+            -- Use client-provided timestamp (must be non-zero)
+            account_with_ts = account_data
+        else
+            -- Server sets timestamp
+            account_with_ts = string.sub(account_data, 1, 120) .. ts_bytes
+        end
+
         redis.call('SET', key, account_with_ts)
         table.insert(created_accounts, id)
         table.insert(results, string.char(0) .. string.rep('\0', 127)) -- ERR_OK

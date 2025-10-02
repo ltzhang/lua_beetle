@@ -320,6 +320,76 @@ func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counte
 	return nil
 }
 
+// PrintLuaStats prints Lua profiling statistics from Redis
+func (r *RedisStressTest) PrintLuaStats(ctx context.Context, duration float64) {
+	result, err := r.client.Do(ctx, "SCRIPT", "PROFILE").Result()
+	if err != nil {
+		fmt.Printf("\nWarning: failed to get Lua statistics: %v\n", err)
+		return
+	}
+
+	// Redis returns map[interface{}]interface{}
+	rawMap, ok := result.(map[interface{}]interface{})
+	if !ok {
+		fmt.Printf("\nWarning: unexpected Lua stats format: %T\n", result)
+		return
+	}
+
+	// Convert to map[string]interface{}
+	statsMap := make(map[string]interface{})
+	for k, v := range rawMap {
+		if keyStr, ok := k.(string); ok {
+			statsMap[keyStr] = v
+		}
+	}
+
+	// Extract values
+	totalScripts := getInt64(statsMap["total_scripts"])
+	totalTimeUs := getInt64(statsMap["total_time_us"])
+	redisCallTimeUs := getInt64(statsMap["redis_call_time_us"])
+	redisCallCount := getInt64(statsMap["redis_call_count"])
+	luaInterpTimeUs := getInt64(statsMap["lua_interp_time_us"])
+	luaInterpPercent := getFloat64(statsMap["lua_interp_percent"])
+
+	fmt.Printf("\n=== Lua Profiling Statistics ===\n")
+	fmt.Printf("Total Scripts Executed: %d (%.2f scripts/sec)\n", totalScripts, float64(totalScripts)/duration)
+	fmt.Printf("Total Lua Time: %d us (%.2f us/sec, %.2f us/script)\n",
+		totalTimeUs, float64(totalTimeUs)/duration, float64(totalTimeUs)/float64(totalScripts))
+	fmt.Printf("Redis Call Time: %d us (%.2f us/sec, %.2f us/call)\n",
+		redisCallTimeUs, float64(redisCallTimeUs)/duration, float64(redisCallTimeUs)/float64(redisCallCount))
+	fmt.Printf("Redis Call Count: %d (%.2f calls/sec)\n", redisCallCount, float64(redisCallCount)/duration)
+	fmt.Printf("Lua Interpretation Time: %d us (%.2f us/sec, %.2f us/script)\n",
+		luaInterpTimeUs, float64(luaInterpTimeUs)/duration, float64(luaInterpTimeUs)/float64(totalScripts))
+	fmt.Printf("Lua Interpretation Percent: %.2f%%\n", luaInterpPercent)
+}
+
+// Helper functions to extract numeric values from interface{}
+func getInt64(v interface{}) int64 {
+	switch val := v.(type) {
+	case int64:
+		return val
+	case int:
+		return int64(val)
+	case float64:
+		return int64(val)
+	default:
+		return 0
+	}
+}
+
+func getFloat64(v interface{}) float64 {
+	switch val := v.(type) {
+	case float64:
+		return val
+	case int64:
+		return float64(val)
+	case int:
+		return float64(val)
+	default:
+		return 0.0
+	}
+}
+
 // Run executes the stress test
 func (r *RedisStressTest) Run(ctx context.Context) error {
 	fmt.Printf("\n=== Starting %s Stress Test ===\n", r.name)
@@ -332,6 +402,11 @@ func (r *RedisStressTest) Run(ctx context.Context) error {
 	// Setup
 	if err := r.Setup(ctx); err != nil {
 		return fmt.Errorf("setup failed: %w", err)
+	}
+
+	// Reset Lua profiling statistics
+	if err := r.client.Do(ctx, "SCRIPT", "PROFILERESET").Err(); err != nil {
+		fmt.Printf("Warning: failed to reset Lua statistics: %v\n", err)
 	}
 
 	// Start metrics
@@ -348,12 +423,35 @@ func (r *RedisStressTest) Run(ctx context.Context) error {
 		go r.RunWorker(testCtx, i, &wg)
 	}
 
+	// Progress reporter
+	progressTicker := time.NewTicker(5 * time.Second)
+	defer progressTicker.Stop()
+
+	go func() {
+		for {
+			select {
+			case <-progressTicker.C:
+				elapsed := time.Since(r.metrics.StartTime).Seconds()
+				completed := r.metrics.OperationsCompleted.Load()
+				fmt.Printf("[Progress] %.0fs elapsed, %d ops completed (%.0f ops/sec)\n",
+					elapsed, completed, float64(completed)/elapsed)
+			case <-testCtx.Done():
+				return
+			}
+		}
+	}()
+
 	// Wait for completion
 	wg.Wait()
 	r.metrics.EndTime = time.Now()
 
+	duration := r.metrics.EndTime.Sub(r.metrics.StartTime).Seconds()
+
 	// Print results
 	PrintMetrics(r.metrics, r.name+" (Lua Beetle)")
+
+	// Print Lua profiling statistics
+	r.PrintLuaStats(ctx, duration)
 
 	return nil
 }

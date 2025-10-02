@@ -44,22 +44,42 @@ if (flags % 2) == 1 then
     return string.char(1) .. string.rep('\0', 127) -- ERR_LINKED_EVENT_CHAIN_OPEN = 1
 end
 
--- Get current timestamp
-local timestamp = redis.call('TIME')
-local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+-- Prepare account data with timestamp
+local account_with_ts
+local IMPORTED_FLAG = 0x0002
 
--- Build account data with timestamp (replace last 8 bytes)
-local account_with_ts = string.sub(account_data, 1, 120) ..
-                        string.char(
-                            ts % 256,
-                            math.floor(ts / 256) % 256,
-                            math.floor(ts / 65536) % 256,
-                            math.floor(ts / 16777216) % 256,
-                            math.floor(ts / 4294967296) % 256,
-                            math.floor(ts / 1099511627776) % 256,
-                            math.floor(ts / 281474976710656) % 256,
-                            math.floor(ts / 72057594037927936) % 256
-                        )
+-- Only set timestamp if imported flag is NOT set
+if (flags % 4) < 2 then
+    -- imported flag is NOT set, server sets timestamp
+    local timestamp = redis.call('TIME')
+    local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+
+    account_with_ts = string.sub(account_data, 1, 120) ..
+                      string.char(
+                          ts % 256,
+                          math.floor(ts / 256) % 256,
+                          math.floor(ts / 65536) % 256,
+                          math.floor(ts / 16777216) % 256,
+                          math.floor(ts / 4294967296) % 256,
+                          math.floor(ts / 1099511627776) % 256,
+                          math.floor(ts / 281474976710656) % 256,
+                          math.floor(ts / 72057594037927936) % 256
+                      )
+else
+    -- imported flag IS set, use client-provided timestamp (must be non-zero)
+    local ts_bytes = string.sub(account_data, 121, 128)
+    local ts = 0
+    for i = 1, 8 do
+        ts = ts + string.byte(ts_bytes, i) * (256 ^ (i - 1))
+    end
+
+    -- Timestamp must be non-zero when imported flag is set
+    if ts == 0 then
+        return string.char(32) .. string.rep('\0', 127) -- ERR_INVALID_DATA_SIZE = 32 (or could use different error)
+    end
+
+    account_with_ts = account_data
+end
 
 -- Store as single binary string
 redis.call('SET', key, account_with_ts)

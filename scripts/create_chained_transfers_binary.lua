@@ -59,7 +59,7 @@ local function add_u128(a_data, a_offset, b_data, b_offset)
     return encode_u128(a_val + b_val)
 end
 
--- Get timestamp once
+-- Get timestamp once (for non-imported transfers)
 local timestamp = redis.call('TIME')
 local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
 local ts_bytes = string.char(
@@ -79,6 +79,7 @@ local modified_accounts = {}
 local created_transfers = {}
 
 local FLAG_PENDING = 0x0002
+local FLAG_IMPORTED = 0x0010
 local ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 0x0002
 local ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 0x0004
 
@@ -94,6 +95,7 @@ for i = 0, num_transfers - 1 do
     local flags = string.byte(transfer_data, 119) + string.byte(transfer_data, 120) * 256
     local is_linked = (flags % 2) == 1
     local is_pending = (math.floor(flags / FLAG_PENDING) % 2) == 1
+    local is_imported = (math.floor(flags / FLAG_IMPORTED) % 2) == 1
 
     local error_code = 0
 
@@ -224,7 +226,15 @@ for i = 0, num_transfers - 1 do
         end
 
         -- Commit changes
-        local transfer_with_ts = string.sub(transfer_data, 1, 120) .. ts_bytes
+        local transfer_with_ts
+        if is_imported then
+            -- Use client-provided timestamp (must be non-zero)
+            transfer_with_ts = transfer_data
+        else
+            -- Server sets timestamp
+            transfer_with_ts = string.sub(transfer_data, 1, 120) .. ts_bytes
+        end
+
         local debit_key = "account:" .. debit_account_id
         local credit_key = "account:" .. credit_account_id
         local transfer_key = "transfer:" .. transfer_id

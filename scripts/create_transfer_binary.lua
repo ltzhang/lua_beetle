@@ -166,22 +166,42 @@ if (math.floor(credit_flags / ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS) % 2) 
     end
 end
 
--- Get timestamp
-local timestamp = redis.call('TIME')
-local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+-- Prepare transfer with timestamp
+local transfer_with_ts
+local IMPORTED_FLAG = 0x0010  -- For transfers, imported is 0x0010
 
--- Build transfer with timestamp
-local transfer_with_ts = string.sub(transfer_data, 1, 120) ..
-                         string.char(
-                             ts % 256,
-                             math.floor(ts / 256) % 256,
-                             math.floor(ts / 65536) % 256,
-                             math.floor(ts / 16777216) % 256,
-                             math.floor(ts / 4294967296) % 256,
-                             math.floor(ts / 1099511627776) % 256,
-                             math.floor(ts / 281474976710656) % 256,
-                             math.floor(ts / 72057594037927936) % 256
-                         )
+-- Only set timestamp if imported flag is NOT set
+if (math.floor(flags / IMPORTED_FLAG) % 2) == 0 then
+    -- imported flag is NOT set, server sets timestamp
+    local timestamp = redis.call('TIME')
+    local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+
+    transfer_with_ts = string.sub(transfer_data, 1, 120) ..
+                       string.char(
+                           ts % 256,
+                           math.floor(ts / 256) % 256,
+                           math.floor(ts / 65536) % 256,
+                           math.floor(ts / 16777216) % 256,
+                           math.floor(ts / 4294967296) % 256,
+                           math.floor(ts / 1099511627776) % 256,
+                           math.floor(ts / 281474976710656) % 256,
+                           math.floor(ts / 72057594037927936) % 256
+                       )
+else
+    -- imported flag IS set, use client-provided timestamp (must be non-zero)
+    local ts_bytes = string.sub(transfer_data, 121, 128)
+    local ts = 0
+    for i = 1, 8 do
+        ts = ts + string.byte(ts_bytes, i) * (256 ^ (i - 1))
+    end
+
+    -- Timestamp must be non-zero when imported flag is set
+    if ts == 0 then
+        return string.char(32) .. string.rep('\0', 127) -- ERR_INVALID_DATA_SIZE
+    end
+
+    transfer_with_ts = transfer_data
+end
 
 -- Write everything in 3 operations (minimal round trips)
 redis.call('SET', debit_key, new_debit_account)
