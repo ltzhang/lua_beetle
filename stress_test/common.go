@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
@@ -19,7 +18,6 @@ type StressTestConfig struct {
 	HotAccountSkew float64 // Zipf skew parameter (0=uniform, 1+=skewed, typically 0.99)
 	BatchSize      int     // Number of operations per batch
 	LedgerID       uint32  // Ledger ID for all accounts/transfers
-	UseBinary      bool    // Use binary encoding instead of JSON
 	Verbose        bool    // Enable verbose output
 }
 
@@ -144,85 +142,7 @@ func RandomAmount(rng *rand.Rand) uint64 {
 // Encoding interfaces and implementations
 // ============================================================================
 
-// Encoder interface for account/transfer encoding
-type Encoder interface {
-	EncodeAccount(id uint64, ledger uint32, code uint16, flags uint16) (interface{}, error)
-	EncodeTransfer(id string, debitAccountID, creditAccountID uint64, amount uint64, ledger uint32, code uint16, flags uint16) (interface{}, error)
-	EncodeTransferWithPending(id string, debitAccountID, creditAccountID uint64, amount uint64, pendingID string, ledger uint32, code uint16, flags uint16) (interface{}, error)
-	DecodeAccountID(data interface{}) string
-	DecodeTransferResult(data interface{}) (uint8, error)
-}
-
-// JSONEncoder implements text-based JSON encoding
-type JSONEncoder struct{}
-
-func NewJSONEncoder() *JSONEncoder {
-	return &JSONEncoder{}
-}
-
-func (e *JSONEncoder) EncodeAccount(id uint64, ledger uint32, code uint16, flags uint16) (interface{}, error) {
-	account := map[string]interface{}{
-		"id":     fmt.Sprintf("%d", id),
-		"ledger": ledger,
-		"code":   code,
-		"flags":  flags,
-	}
-	return json.Marshal(account)
-}
-
-func (e *JSONEncoder) EncodeTransfer(id string, debitAccountID, creditAccountID uint64, amount uint64, ledger uint32, code uint16, flags uint16) (interface{}, error) {
-	transfer := map[string]interface{}{
-		"id":                id,
-		"debit_account_id":  fmt.Sprintf("%d", debitAccountID),
-		"credit_account_id": fmt.Sprintf("%d", creditAccountID),
-		"amount":            amount,
-		"ledger":            ledger,
-		"code":              code,
-		"flags":             flags,
-	}
-	return json.Marshal(transfer)
-}
-
-func (e *JSONEncoder) EncodeTransferWithPending(id string, debitAccountID, creditAccountID uint64, amount uint64, pendingID string, ledger uint32, code uint16, flags uint16) (interface{}, error) {
-	transfer := map[string]interface{}{
-		"id":                id,
-		"debit_account_id":  fmt.Sprintf("%d", debitAccountID),
-		"credit_account_id": fmt.Sprintf("%d", creditAccountID),
-		"amount":            amount,
-		"pending_id":        pendingID,
-		"ledger":            ledger,
-		"code":              code,
-		"flags":             flags,
-	}
-	return json.Marshal(transfer)
-}
-
-func (e *JSONEncoder) DecodeAccountID(data interface{}) string {
-	// For JSON, this would parse the JSON and extract ID
-	// For now, simplified
-	return ""
-}
-
-func (e *JSONEncoder) DecodeTransferResult(data interface{}) (uint8, error) {
-	str, ok := data.(string)
-	if !ok {
-		return 0, fmt.Errorf("invalid result type")
-	}
-
-	var resultObj map[string]interface{}
-	if err := json.Unmarshal([]byte(str), &resultObj); err != nil {
-		return 0, err
-	}
-
-	errCode, ok := resultObj["result"].(float64)
-	if !ok {
-		return 0, fmt.Errorf("result field missing")
-	}
-
-	return uint8(errCode), nil
-}
-
-// BinaryEncoder implements fixed-size binary encoding
+// BinaryEncoder implements fixed-size binary encoding matching TigerBeetle format
 type BinaryEncoder struct{}
 
 func NewBinaryEncoder() *BinaryEncoder {

@@ -17,7 +17,7 @@ type RedisStressTest struct {
 	config                   *StressTestConfig
 	metrics                  *TestMetrics
 	name                     string
-	encoder                  Encoder
+	encoder                  *BinaryEncoder
 	createAccountSHA         string
 	createTransferSHA        string
 	lookupAccountSHA         string
@@ -38,13 +38,8 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 		return nil, fmt.Errorf("failed to connect to %s: %w", name, err)
 	}
 
-	// Choose encoder based on config
-	var encoder Encoder
-	if config.UseBinary {
-		encoder = NewBinaryEncoder()
-	} else {
-		encoder = NewJSONEncoder()
-	}
+	// Use binary encoder (only supported format)
+	encoder := NewBinaryEncoder()
 
 	test := &RedisStressTest{
 		client:  client,
@@ -62,19 +57,15 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 	return test, nil
 }
 
-// loadScripts loads all Lua scripts into DragonflyDB
+// loadScripts loads all Lua scripts into Redis/DragonflyDB
 func (r *RedisStressTest) loadScripts(ctx context.Context) error {
-	suffix := ".lua"
-	if r.config.UseBinary {
-		suffix = "_binary.lua"
-	}
-
+	// Only binary encoding is supported
 	scripts := map[string]*string{
-		"../scripts/create_account" + suffix:         &r.createAccountSHA,
-		"../scripts/create_transfer" + suffix:        &r.createTransferSHA,
-		"../scripts/lookup_account" + suffix:         &r.lookupAccountSHA,
-		"../scripts/get_account_transfers" + suffix:  &r.getAccountTransfersSHA,
-		"../scripts/get_account_balances" + suffix:   &r.getAccountBalancesSHA,
+		"../scripts/create_account_binary.lua":        &r.createAccountSHA,
+		"../scripts/create_transfer_binary.lua":       &r.createTransferSHA,
+		"../scripts/lookup_account_binary.lua":        &r.lookupAccountSHA,
+		"../scripts/get_account_transfers_binary.lua": &r.getAccountTransfersSHA,
+		"../scripts/get_account_balances_binary.lua":  &r.getAccountBalancesSHA,
 	}
 
 	for path, shaPtr := range scripts {
@@ -217,12 +208,7 @@ func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenera
 		pipe := r.client.Pipeline()
 		for i := 0; i < r.config.BatchSize; i++ {
 			accountID := idGen.Next()
-			var arg interface{}
-			if r.config.UseBinary {
-				arg = U64ToID16(accountID)
-			} else {
-				arg = fmt.Sprintf("%d", accountID)
-			}
+			arg := U64ToID16(accountID)
 			pipe.EvalSha(ctx, r.lookupAccountSHA, []string{}, arg)
 		}
 
@@ -236,12 +222,7 @@ func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenera
 	} else {
 		// Get account transfers
 		accountID := idGen.Next()
-		var arg interface{}
-		if r.config.UseBinary {
-			arg = U64ToID16(accountID)
-		} else {
-			arg = fmt.Sprintf("%d", accountID)
-		}
+		arg := U64ToID16(accountID)
 		_, err := r.client.EvalSha(ctx, r.getAccountTransfersSHA, []string{}, arg).Result()
 		if err != nil {
 			return err
