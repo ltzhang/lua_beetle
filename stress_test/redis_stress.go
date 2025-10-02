@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -18,6 +17,7 @@ type RedisStressTest struct {
 	config                   *StressTestConfig
 	metrics                  *TestMetrics
 	name                     string
+	encoder                  Encoder
 	createAccountSHA         string
 	createTransferSHA        string
 	lookupAccountSHA         string
@@ -38,11 +38,20 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 		return nil, fmt.Errorf("failed to connect to %s: %w", name, err)
 	}
 
+	// Choose encoder based on config
+	var encoder Encoder
+	if config.UseBinary {
+		encoder = NewBinaryEncoder()
+	} else {
+		encoder = NewJSONEncoder()
+	}
+
 	test := &RedisStressTest{
 		client:  client,
 		config:  config,
 		metrics: &TestMetrics{},
 		name:    name,
+		encoder: encoder,
 	}
 
 	// Load Lua scripts
@@ -55,12 +64,17 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 
 // loadScripts loads all Lua scripts into DragonflyDB
 func (r *RedisStressTest) loadScripts(ctx context.Context) error {
+	suffix := ".lua"
+	if r.config.UseBinary {
+		suffix = "_binary.lua"
+	}
+
 	scripts := map[string]*string{
-		"../scripts/create_account.lua":         &r.createAccountSHA,
-		"../scripts/create_transfer.lua":        &r.createTransferSHA,
-		"../scripts/lookup_account.lua":         &r.lookupAccountSHA,
-		"../scripts/get_account_transfers.lua":  &r.getAccountTransfersSHA,
-		"../scripts/get_account_balances.lua":   &r.getAccountBalancesSHA,
+		"../scripts/create_account" + suffix:         &r.createAccountSHA,
+		"../scripts/create_transfer" + suffix:        &r.createTransferSHA,
+		"../scripts/lookup_account" + suffix:         &r.lookupAccountSHA,
+		"../scripts/get_account_transfers" + suffix:  &r.getAccountTransfersSHA,
+		"../scripts/get_account_balances" + suffix:   &r.getAccountBalancesSHA,
 	}
 
 	for path, shaPtr := range scripts {
@@ -97,19 +111,12 @@ func (r *RedisStressTest) Setup(ctx context.Context) error {
 
 		pipe := r.client.Pipeline()
 		for j := i; j < end; j++ {
-			account := map[string]interface{}{
-				"id":     fmt.Sprintf("%d", j+1),
-				"ledger": r.config.LedgerID,
-				"code":   10,
-				"flags":  0,
-			}
-
-			accountJSON, err := json.Marshal(account)
+			accountData, err := r.encoder.EncodeAccount(uint64(j+1), r.config.LedgerID, 10, 0)
 			if err != nil {
-				return fmt.Errorf("failed to marshal account: %w", err)
+				return fmt.Errorf("failed to encode account: %w", err)
 			}
 
-			pipe.EvalSha(ctx, r.createAccountSHA, []string{}, accountJSON)
+			pipe.EvalSha(ctx, r.createAccountSHA, []string{}, accountData)
 		}
 
 		// Execute pipeline
@@ -124,12 +131,12 @@ func (r *RedisStressTest) Setup(ctx context.Context) error {
 				return fmt.Errorf("account %d creation failed: %w", i+idx+1, result.Err())
 			}
 
-			var resultObj map[string]interface{}
-			if err := json.Unmarshal([]byte(result.(*redis.Cmd).Val().(string)), &resultObj); err != nil {
-				return fmt.Errorf("failed to unmarshal result: %w", err)
+			errCode, err := r.encoder.DecodeTransferResult(result.(*redis.Cmd).Val())
+			if err != nil {
+				return fmt.Errorf("failed to decode result: %w", err)
 			}
 
-			if errCode := resultObj["result"].(float64); errCode != 0 {
+			if errCode != 0 {
 				return fmt.Errorf("account %d creation failed with result code: %v", i+idx+1, errCode)
 			}
 		}
@@ -208,8 +215,14 @@ func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenera
 		// Lookup accounts using pipeline
 		pipe := r.client.Pipeline()
 		for i := 0; i < r.config.BatchSize; i++ {
-			accountID := fmt.Sprintf("%d", idGen.Next())
-			pipe.EvalSha(ctx, r.lookupAccountSHA, []string{}, accountID)
+			accountID := idGen.Next()
+			var arg interface{}
+			if r.config.UseBinary {
+				arg = U64ToID16(accountID)
+			} else {
+				arg = fmt.Sprintf("%d", accountID)
+			}
+			pipe.EvalSha(ctx, r.lookupAccountSHA, []string{}, arg)
 		}
 
 		_, err := pipe.Exec(ctx)
@@ -220,8 +233,14 @@ func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenera
 		r.metrics.AccountsLookedup.Add(uint64(r.config.BatchSize))
 	} else {
 		// Get account transfers
-		accountID := fmt.Sprintf("%d", idGen.Next())
-		_, err := r.client.EvalSha(ctx, r.getAccountTransfersSHA, []string{}, accountID).Result()
+		accountID := idGen.Next()
+		var arg interface{}
+		if r.config.UseBinary {
+			arg = U64ToID16(accountID)
+		} else {
+			arg = fmt.Sprintf("%d", accountID)
+		}
+		_, err := r.client.EvalSha(ctx, r.getAccountTransfersSHA, []string{}, arg).Result()
 		if err != nil {
 			return err
 		}
@@ -258,22 +277,15 @@ func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counte
 			continue
 		}
 
-		transfer := map[string]interface{}{
-			"id":                GenerateTransferID(workerID, *counter),
-			"debit_account_id":  fmt.Sprintf("%d", debitAccountID),
-			"credit_account_id": fmt.Sprintf("%d", creditAccountID),
-			"amount":            RandomAmount(rng),
-			"ledger":            r.config.LedgerID,
-			"code":              10,
-			"flags":             0,
-		}
+		transferID := GenerateTransferID(workerID, *counter)
+		amount := RandomAmount(rng)
 
-		transferJSON, err := json.Marshal(transfer)
+		transferData, err := r.encoder.EncodeTransfer(transferID, debitAccountID, creditAccountID, amount, r.config.LedgerID, 10, 0)
 		if err != nil {
 			return err
 		}
 
-		pipe.EvalSha(ctx, r.createTransferSHA, []string{}, transferJSON)
+		pipe.EvalSha(ctx, r.createTransferSHA, []string{}, transferData)
 	}
 
 	// Execute pipeline
@@ -289,12 +301,12 @@ func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counte
 			continue
 		}
 
-		var resultObj map[string]interface{}
-		if err := json.Unmarshal([]byte(result.(*redis.Cmd).Val().(string)), &resultObj); err != nil {
+		errCode, err := r.encoder.DecodeTransferResult(result.(*redis.Cmd).Val())
+		if err != nil {
 			continue
 		}
 
-		if errCode := resultObj["result"].(float64); errCode == 0 {
+		if errCode == 0 {
 			successCount++
 		}
 	}

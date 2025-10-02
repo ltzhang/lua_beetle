@@ -18,6 +18,7 @@ func main() {
 	hotAccountSkew := flag.Float64("skew", 0.0, "Hot account skew (0=uniform, 0.99=very skewed)")
 	batchSize := flag.Int("batch", 100, "Operations per batch")
 	ledgerID := flag.Int("ledger", 700, "Ledger ID")
+	useBinary := flag.Bool("binary", false, "Use binary encoding instead of JSON")
 	verbose := flag.Bool("verbose", false, "Enable verbose output")
 	tbAddress := flag.String("tb-address", "3000", "TigerBeetle server address")
 	noCleanup := flag.Bool("no-cleanup", false, "Skip cleanup after test")
@@ -48,6 +49,7 @@ func main() {
 		HotAccountSkew: *hotAccountSkew,
 		BatchSize:      *batchSize,
 		LedgerID:       uint32(*ledgerID),
+		UseBinary:      *useBinary,
 		Verbose:        *verbose,
 	}
 

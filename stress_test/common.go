@@ -17,6 +17,7 @@ type StressTestConfig struct {
 	HotAccountSkew float64 // Zipf skew parameter (0=uniform, 1+=skewed, typically 0.99)
 	BatchSize      int     // Number of operations per batch
 	LedgerID       uint32  // Ledger ID for all accounts/transfers
+	UseBinary      bool    // Use binary encoding instead of JSON
 	Verbose        bool    // Enable verbose output
 }
 
