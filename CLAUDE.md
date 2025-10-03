@@ -4,256 +4,413 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Lua Beetle is a Redis Lua implementation of TigerBeetle's core financial transaction APIs. It provides functionally equivalent operations for account management and atomic transfers using Redis as the storage backend, matching TigerBeetle's exact error codes, flags, and semantics.
+Lua Beetle is a Redis Lua implementation of TigerBeetle's core financial transaction APIs. It provides functionally equivalent operations for account management and atomic transfers using Redis-compatible backends (Redis, DragonflyDB, EloqKV), matching TigerBeetle's exact error codes, flags, and semantics.
 
-## Build and Test Commands
+**Key Features:**
+- Binary encoding (128-byte fixed format)
+- Two-phase transfers (pending/post/void)
+- Hot/cold account workload modeling
+- Multiple workload types (transfer, lookup, twophase, mixed)
+- Comprehensive functional and stress testing
 
-### Basic Tests
+## Data Encoding
 
-```bash
-# Start Redis (required)
-cd third_party
-./redis-server --daemonize yes
+**ALL operations use binary encoding (128 bytes fixed-size format):**
 
-# Run Python tests
-cd tests
-source ~/venv/bin/activate  # Activate Python virtual environment
-python3 test_basic.py
+```
+Account (128 bytes):
+  [0:16]    ID (uint128, little-endian)
+  [16:32]   debits_pending (uint128)
+  [32:48]   debits_posted (uint128)
+  [48:64]   credits_pending (uint128)
+  [64:80]   credits_posted (uint128)
+  [80:96]   user_data_128 (uint128)
+  [96:112]  user_data_64/user_data_32 (uint64/uint32)
+  [112:116] ledger (uint32)
+  [116:118] code (uint16)
+  [118:120] flags (uint16)
+  [120:128] timestamp/reserved (uint64)
 
-# Tests should show: ✅ All tests passed!
+Transfer (128 bytes):
+  [0:16]    ID (uint128)
+  [16:32]   debit_account_id (uint128)
+  [32:48]   credit_account_id (uint128)
+  [48:64]   amount (uint128)
+  [64:80]   pending_id (uint128) - for post/void operations
+  [80:96]   user_data_128 (uint128)
+  [96:112]  user_data_64/user_data_32 (uint64/uint32)
+  [112:116] ledger (uint32)
+  [116:118] code (uint16)
+  [118:120] flags (uint16)
+  [120:128] timestamp (uint64)
 ```
 
-### Stress Tests
+**Flags:**
+- `0x0001` - LINKED (not currently used, reserved)
+- `0x0002` - PENDING (create pending transfer)
+- `0x0004` - POST_PENDING_TRANSFER (commit pending)
+- `0x0008` - VOID_PENDING_TRANSFER (cancel pending)
+
+## Test Data Directory
+
+**IMPORTANT**: All test executables MUST run with data stored in `/mnt/ramdisk/tests/` for performance:
 
 ```bash
-# Build stress test
-cd stress_test
-go build -o stress_test
+# Ensure ramdisk directory exists
+mkdir -p /mnt/ramdisk/tests
 
-# Run Redis stress test
-./stress_test -mode=redis -accounts=1000 -workers=4 -duration=10
-
-# Run comparison (Redis + TigerBeetle)
-./stress_test -mode=all -accounts=10000 -workers=10 -duration=30
-
-# Run DragonflyDB test (requires dragonfly-x86_64 running on port 6380)
-./stress_test -mode=dragonfly -accounts=1000 -workers=4 -duration=10
+# All databases should use this directory for data files
+# This avoids disk I/O and provides consistent performance
 ```
 
-### Start Required Services
+## Running Services
 
-#### Redis (Required - Port 6379)
+### Redis (Port 6379)
+
 ```bash
-cd third_party
-./redis-server --daemonize yes
+# Start Redis with data in ramdisk
+cd /mnt/ramdisk/tests
+/home/lintaoz/database/redis/src/redis-server \
+  --dir /mnt/ramdisk/tests \
+  --daemonize yes
 
-# Verify it's running
-redis-cli ping  # Should return: PONG
+# Verify
+/home/lintaoz/database/redis/src/redis-cli ping  # Should return: PONG
 
-# Stop Redis
-redis-cli shutdown
+# Stop and clean
+/home/lintaoz/database/redis/src/redis-cli shutdown
+rm -f /mnt/ramdisk/tests/dump.rdb
 
 # Check if running
 pgrep redis-server
 ```
 
-#### DragonflyDB (Optional - Port 6380)
-DragonflyDB is a Redis-compatible alternative with better performance for some workloads.
+### EloqKV (Port 6379 - Redis Compatible)
+
+**IMPORTANT**: EloqKV uses the same port as Redis. Ensure Redis is NOT running before starting EloqKV.
+
+```bash
+# Kill any running Redis first
+killall redis-server 2>/dev/null
+
+# Start EloqKV with data in ramdisk
+cd /mnt/ramdisk/tests
+/path/to/eloqkv \
+  --port 6379
+
+# Verify (use redis-cli - it's compatible)
+redis-cli ping  # Should return: PONG
+
+# Stop and clean
+killall eloqkv
+rm -rf /mnt/ramdisk/tests/eloqkv_data
+
+# Check if running
+pgrep eloqkv
+```
+
+### DragonflyDB (Port 6380)
 
 **Important**: Must use `--default_lua_flags=allow-undeclared-keys` because Lua Beetle scripts access keys dynamically.
 
 ```bash
-cd third_party
+# Start DragonflyDB with data in ramdisk
+cd /mnt/ramdisk/tests
+/home/lintaoz/work/lua_beetle/third_party/dragonfly-x86_64 \
+  --logtostderr \
+  --port=6380 \
+  --dir=/mnt/ramdisk/tests \
+  --dbfilename=dragonfly.db \
+  --default_lua_flags=allow-undeclared-keys > dragonfly.log 2>&1 &
 
-# Start DragonflyDB
-./dragonfly-x86_64 --logtostderr --port=6380 --default_lua_flags=allow-undeclared-keys > dragonfly.log 2>&1 &
-
-# Verify it's running
+# Verify
 redis-cli -p 6380 ping  # Should return: PONG
 
-# Stop DragonflyDB
+# Stop and clean
 killall dragonfly-x86_64
+rm -f /mnt/ramdisk/tests/dragonfly.db /mnt/ramdisk/tests/dragonfly.log
 
 # Check if running
 pgrep -f dragonfly
 ```
 
-#### TigerBeetle (Optional - Port 3000)
-TigerBeetle is used for comparison testing in stress tests.
+### TigerBeetle (Port 3000)
 
 ```bash
-cd third_party
+# Format and start with data in ramdisk
+cd /mnt/ramdisk/tests
+/home/lintaoz/work/lua_beetle/third_party/tigerbeetle format \
+  --cluster=0 --replica=0 --replica-count=1 --development \
+  ./0_0.tigerbeetle
 
-# First time: Format the database file
-./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle
+/home/lintaoz/work/lua_beetle/third_party/tigerbeetle start \
+  --addresses=3000 --development \
+  ./0_0.tigerbeetle > tigerbeetle.log 2>&1 &
 
-# Start TigerBeetle server
-./tigerbeetle start --addresses=3000 --development ./0_0.tigerbeetle > tigerbeetle.log 2>&1 &
-
-# Verify it's running
+# Verify
 pgrep tigerbeetle
 
-# Stop TigerBeetle
+# Stop and clean (TigerBeetle has immutable ledger - must delete to reset)
 killall tigerbeetle
+rm -f /mnt/ramdisk/tests/0_0.tigerbeetle /mnt/ramdisk/tests/tigerbeetle.log
 
-# Clean up (removes all data)
-rm -f 0_0.tigerbeetle tigerbeetle.log
+# Check if running
+pgrep tigerbeetle
+```
 
-# To restart with fresh data:
+## Functional Tests
+
+### Python Tests
+
+```bash
+# Start Redis first
+cd /mnt/ramdisk/tests
+/home/lintaoz/database/redis/src/redis-server --dir /mnt/ramdisk/tests --daemonize yes
+
+# Run tests
+cd /home/lintaoz/work/lua_beetle/tests
+source ~/venv/bin/activate
+python3 test_functional.py
+
+# Expected output:
+# ✅ All tests passed!
+```
+
+**Test Coverage:**
+- Account creation and lookup
+- Duplicate detection
+- Simple transfers
+- Multiple transfers
+- Two-phase transfers (pending/post/void)
+- Error handling
+
+### Go Tests
+
+```bash
+# Start Redis first
+cd /mnt/ramdisk/tests
+/home/lintaoz/database/redis/src/redis-server --dir /mnt/ramdisk/tests --daemonize yes
+
+# Run tests
+cd /home/lintaoz/work/lua_beetle/stress_test
+go test -v functional_test.go common.go
+
+# Expected output:
+# PASS
+# ok  	command-line-arguments	0.059s
+```
+
+## Stress Tests
+
+**CRITICAL**: Always clean data before running stress tests!
+
+### Quick Test Examples
+
+```bash
+# Redis transfer workload
+./stress_test -mode=redis -workload=transfer \
+  -accounts=10000 -hot-accounts=100 -workers=4 -duration=30 -batch=100
+
+# TigerBeetle lookup workload
+./stress_test -mode=tigerbeetle -workload=lookup \
+  -accounts=10000 -hot-accounts=100 -workers=4 -duration=30 -batch=100
+
+# Mixed workload (70% transfers, 20% two-phase)
+./stress_test -mode=redis -workload=mixed \
+  -transfer-ratio=0.7 -twophase-ratio=0.2 \
+  -accounts=10000 -hot-accounts=100 -workers=4 -duration=30 -batch=100
+```
+
+### Workload Types
+
+1. **`transfer`** - Pure transfer workload
+   - Transfers between 1 hot account + 1 random account
+   - Tests write-heavy performance
+
+2. **`lookup`** - Pure lookup workload
+   - 50% lookups on hot accounts
+   - 50% lookups on random accounts
+   - Tests read-heavy performance
+
+3. **`twophase`** - Two-phase transfer workload
+   - 50% create pending
+   - 25% post pending
+   - 25% void pending
+   - Tests complex workflows
+
+4. **`mixed`** - Configurable mix
+   - `-transfer-ratio=0.7` - 70% transfers, 30% lookups
+   - `-twophase-ratio=0.2` - 20% of transfers are two-phase
+
+### Hot/Cold Account Model
+
+**Key Concept**: Simulates realistic workloads where certain accounts see disproportionate traffic.
+
+- Transfers always involve: **1 hot account + 1 random account**
+- Lookups: **50% hot, 50% random**
+
+This models real scenarios like exchange wallets, popular merchants, etc.
+
+### Comprehensive Benchmark Suite
+
+```bash
+# Run full benchmark suite (192 tests, ~2 hours)
+cd /home/lintaoz/work/lua_beetle/stress_test
+./run_benchmarks.sh
+
+# Monitor progress
+./monitor_benchmarks.sh
+
+# Analyze results
+python3 analyze_results.py benchmark_results_<timestamp>/
+```
+
+**Test Matrix:**
+- **Backends**: Redis, TigerBeetle
+- **Workloads**: transfer, lookup, twophase, mixed
+- **Hot Accounts**: 1, 10, 50, 100, 1000, 10000 (out of 100K total)
+- **Workers**: 1, 2, 4, 8
+- **Total**: 192 test configurations
+
+### Cleaning Data Between Tests
+
+**Redis/DragonflyDB:**
+```bash
+redis-cli FLUSHDB
+# or
+redis-cli -p 6380 FLUSHDB  # DragonflyDB
+```
+
+**EloqKV:**
+```bash
+killall eloqkv
+rm -rf /mnt/ramdisk/tests/eloqkv_data
+# Restart EloqKV
+```
+
+**TigerBeetle:**
+```bash
 killall tigerbeetle
-rm -f 0_0.tigerbeetle tigerbeetle.log
-./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle
-./tigerbeetle start --addresses=3000 --development ./0_0.tigerbeetle > tigerbeetle.log 2>&1 &
+rm -f /mnt/ramdisk/tests/0_0.tigerbeetle
+# Re-format and restart
 ```
-
-**Note**: TigerBeetle has an immutable ledger. To reset data, you must stop the server, delete the data file, reformat, and restart.
-
-## Critical Architecture Principles
-
-### 1. Single Operations vs Chained Operations
-
-**This is the most important architectural distinction:**
-
-- **Single operation scripts** (`create_account.lua`, `create_transfer.lua`, `lookup_account.lua`, etc.):
-  - Handle ONE operation at a time
-  - Take a JSON object (not an array) as input
-  - Explicitly REJECT the `linked` flag (return error if set)
-  - Used with Redis **pipelining** for performance
-  - Independent failures don't affect other operations in the pipeline
-
-- **Chained operation scripts** (`create_chained_accounts.lua`, `create_chained_transfers.lua`):
-  - Handle ARRAYS of operations with `linked` flags
-  - Implement transactional semantics (all-or-nothing for chains)
-  - Support multiple independent chains in one batch
-  - Roll back entire chain on any failure within that chain
-
-**Key insight**: Batching ≠ Transactions
-- Batching is for **performance** (client-side pipelining)
-- Transactions are only for **explicitly linked** operations via the `linked` flag
-- Never batch independent operations in a single script call - use Redis pipelining instead
-
-### 2. Linked Chain Semantics (Matching TigerBeetle Exactly)
-
-A linked chain works as follows:
-- Chain **starts** when an operation has `flags & 0x0001` (LINKED) set
-- Chain **continues** while subsequent operations have LINKED flag
-- Chain **ends** when an operation does NOT have LINKED flag
-- If ANY operation in a chain fails, the ENTIRE chain is rolled back
-- Multiple **independent** chains can exist in one batch
-
-Example:
-```
-[op1 LINKED, op2 NOT_LINKED, op3 LINKED, op4 LINKED, op5 NOT_LINKED]
-Chain 1: [op1, op2] - atomic
-Chain 2: [op3, op4, op5] - atomic
-Chain 1 and Chain 2 are independent of each other
-```
-
-### 3. Error Codes and Response Format
-
-- ALL error codes match TigerBeetle's `CreateAccountsResult` and `CreateTransfersResult` enums exactly
-- Response field is called `result` (NOT `error`)
-- Error code `0` means success
-- Use hex notation for flags: `0x0001`, `0x0002`, `0x0004`, etc.
-
-### 4. Data Storage Schema
-
-**Primary Storage:**
-- Accounts: `account:{id}` - Redis hash
-- Transfers: `transfer:{id}` - Redis hash
-
-**Secondary Indexes (maintained automatically):**
-- Transfer index: `account:{id}:transfers` - Sorted set (score=timestamp)
-- Balance history: `account:{id}:balance_history` - Sorted set (only if HISTORY flag set)
 
 ## Script Architecture
 
 ```
 scripts/
-├── Single Operation Scripts (for pipelining):
-│   ├── create_account.lua         # Create 1 account, reject LINKED
-│   ├── create_transfer.lua        # Create 1 transfer, reject LINKED
-│   ├── lookup_account.lua         # Lookup 1 account by ID
-│   ├── lookup_transfer.lua        # Lookup 1 transfer by ID
-│   ├── get_account_transfers.lua  # Get transfers for 1 account
-│   └── get_account_balances.lua   # Get balance history for 1 account
-│
-├── Chained Operation Scripts (for transactions):
-│   ├── create_chained_accounts.lua  # Array input, support LINKED chains
-│   └── create_chained_transfers.lua # Array input, support LINKED chains
-│
-└── Legacy (kept for convenience):
-    ├── lookup_accounts.lua        # Batch lookup (array input, no LINKED)
-    └── lookup_transfers.lua       # Batch lookup (array input, no LINKED)
+├── create_account.lua         # Create 1 account (binary format)
+├── create_transfer.lua        # Create 1 transfer (binary format)
+│                              # Supports two-phase (PENDING/POST/VOID)
+├── lookup_account.lua         # Lookup 1 account by ID
+├── lookup_transfer.lua        # Lookup 1 transfer by ID
+├── get_account_transfers.lua  # Get transfers for 1 account
+└── get_account_balances.lua   # Get balance history for 1 account
 ```
 
-## Client Usage Pattern
+**All scripts use binary encoding (128 bytes fixed-size format).**
 
-### Python Example (with pipelining)
+## Data Storage Schema
 
-```python
-import redis, json
+**Primary Storage:**
+- Accounts: `account:{id}` - Binary blob (128 bytes)
+- Transfers: `transfer:{hex_id}` - Binary blob (128 bytes)
+  - Note: Transfer IDs are stored as hex strings for Redis key compatibility
 
-r = redis.Redis(decode_responses=True)
+**Secondary Indexes:**
+- Transfer index: `account:{id}:transfers` - Sorted set (score=timestamp)
+- Balance history: `account:{id}:balance_history` - Sorted set (if HISTORY flag set)
 
-# Load single operation scripts
-with open('scripts/create_account.lua') as f:
-    create_account_sha = r.script_load(f.read())
+## Two-Phase Transfer Implementation
 
-# Create multiple independent accounts using pipeline
-pipe = r.pipeline()
-for i in range(1000):
-    account = {"id": str(i), "ledger": 700, "code": 10, "flags": 0}
-    pipe.evalsha(create_account_sha, 0, json.dumps(account))
-results = pipe.execute()
-
-# For linked operations, use chained script
-with open('scripts/create_chained_accounts.lua') as f:
-    create_chained_sha = r.script_load(f.read())
-
-linked_accounts = [
-    {"id": "1", "ledger": 700, "code": 10, "flags": 0x0001},  # LINKED
-    {"id": "2", "ledger": 700, "code": 10, "flags": 0}        # Chain ends
-]
-result = r.evalsha(create_chained_sha, 0, json.dumps(linked_accounts))
-```
-
-### Go Example (stress test pattern)
+### Creating Pending Transfer
 
 ```go
-// Setup: Create accounts using pipeline
-pipe := client.Pipeline()
-for i := 0; i < numAccounts; i++ {
-    account := map[string]interface{}{
-        "id": fmt.Sprintf("%d", i+1),
-        "ledger": 700,
-        "code": 10,
-        "flags": 0,
-    }
-    accountJSON, _ := json.Marshal(account)
-    pipe.EvalSha(ctx, createAccountSHA, []string{}, accountJSON)
-}
-pipe.Exec(ctx)
-
-// Runtime: Create transfers using pipeline
-pipe := client.Pipeline()
-for i := 0; i < batchSize; i++ {
-    transfer := map[string]interface{}{
-        "id": generateID(),
-        "debit_account_id": fmt.Sprintf("%d", debitID),
-        "credit_account_id": fmt.Sprintf("%d", creditID),
-        "amount": 100,
-        "ledger": 700,
-        "code": 10,
-        "flags": 0,  // Independent operation
-    }
-    transferJSON, _ := json.Marshal(transfer)
-    pipe.EvalSha(ctx, createTransferSHA, []string{}, transferJSON)
-}
-results, _ := pipe.Exec(ctx)
+transferData := encoder.EncodeTransfer(
+    "pending_tx_1",     // transfer ID
+    accountID1,         // debit account
+    accountID2,         // credit account
+    500,                // amount
+    ledger, code,
+    0x0002,            // PENDING flag
+)
+client.EvalSha(ctx, createTransferSHA, []string{}, transferData)
 ```
 
-## Common Debugging Practices (from user preferences)
+**Effect:**
+- Increases `debits_pending` on debit account
+- Increases `credits_pending` on credit account
+- No change to `*_posted` fields
+
+### Posting Pending Transfer
+
+```go
+transferData := encoder.EncodeTransferWithPending(
+    "post_tx_1",        // new transfer ID
+    accountID1,         // same accounts
+    accountID2,
+    500,                // same amount
+    "pending_tx_1",     // reference to pending transfer
+    ledger, code,
+    0x0004,            // POST_PENDING flag
+)
+client.EvalSha(ctx, createTransferSHA, []string{}, transferData)
+```
+
+**Effect:**
+- Decreases `debits_pending`, increases `debits_posted`
+- Decreases `credits_pending`, increases `credits_posted`
+- Completes the transfer
+
+### Voiding Pending Transfer
+
+```go
+transferData := encoder.EncodeTransferWithPending(
+    "void_tx_1",        // new transfer ID
+    accountID1,
+    accountID2,
+    500,
+    "pending_tx_1",     // reference to pending transfer
+    ledger, code,
+    0x0008,            // VOID_PENDING flag
+)
+client.EvalSha(ctx, createTransferSHA, []string{}, transferData)
+```
+
+**Effect:**
+- Decreases `debits_pending` to 0
+- Decreases `credits_pending` to 0
+- Cancels the transfer
+
+## Error Codes
+
+**Success:**
+- `0` - OK
+
+**Account Errors:**
+- `21` - ID already exists
+- `38` - Debit account not found
+- `39` - Credit account not found
+- `40` - Accounts must be different
+
+**Transfer Errors:**
+- `34` - Pending transfer not found
+- `35` - Pending transfer already posted
+- `36` - Pending transfer already voided
+- `42` - Exceeds credits
+- `43` - Exceeds debits
+
+## Performance Considerations
+
+1. **Always use SCRIPT LOAD + EVALSHA** (never EVAL)
+2. **Use pipelining** for independent operations
+3. **Batch sizes**:
+   - Redis/DragonflyDB: 100-1000 operations
+   - TigerBeetle: up to 8189 operations
+4. **Connection reuse**: Reuse Redis connections
+5. **Ramdisk**: Always use `/mnt/ramdisk/tests/` for test data
+
+## Common Debugging Practices
 
 When debugging:
 1. Add intrusive sanity checks directly in Lua scripts to verify constraints
@@ -265,40 +422,32 @@ When debugging:
 ## Testing Strategy
 
 Tests MUST:
+- **Always clean data first** before running stress tests
 - Exit immediately on any failure (no continuing after errors)
 - Verify consistency at each step
-- Test both single operations (with pipelining) and chained operations separately
-- Verify that single operation scripts reject LINKED flags
-- Verify that chained operations properly roll back on failure
-- Test multiple independent chains in one batch
-
-## Performance Considerations
-
-1. **Use script loading**: Always use `SCRIPT LOAD` + `EVALSHA`, never `EVAL`
-2. **Pipeline independent operations**: Don't batch in Lua, use Redis pipelining
-3. **Batch sizes**:
-   - Redis pipelining: 1000 operations is typical
-   - TigerBeetle: up to 8189 operations
-4. **Connection reuse**: Reuse Redis connections across operations
+- Use `/mnt/ramdisk/tests/` for all test data
+- Ensure no port conflicts (e.g., Redis vs EloqKV both use 6379)
 
 ## Key Differences from TigerBeetle
 
-- Uses Redis strings for IDs (not 128-bit integers)
-- Uses Redis TIME for timestamps (nanosecond precision)
-- No built-in timeout enforcement (must be handled externally)
-- Secondary indexes are manually maintained (not automatic)
-- DragonflyDB requires `--default_lua_flags=allow-undeclared-keys` flag
+- **Binary encoding**: Fixed 128-byte format (vs. TigerBeetle's native format)
+- **ID storage**: Transfer IDs stored as hex strings in Redis keys
+- **Timestamps**: Uses Redis TIME for nanosecond precision
+- **No built-in timeout**: Must be handled externally
+- **Manual indexes**: Secondary indexes maintained by scripts
 
 ## Common Pitfalls
 
-1. ❌ **Don't batch independent operations in a single script** - use pipelining
-2. ❌ **Don't use batch scripts for single operations** - use single operation scripts
-3. ❌ **Don't allow LINKED flag in single operation scripts** - must reject with error
-4. ❌ **Don't assume batch = transaction** - only LINKED operations are transactional
-5. ❌ **Don't forget to maintain secondary indexes** in create_transfer operations
+1. ❌ **Don't forget to clean data** before stress tests
+2. ❌ **Don't run Redis and EloqKV simultaneously** (same port)
+3. ❌ **Don't use disk for test data** - always use `/mnt/ramdisk/tests/`
+4. ❌ **Don't mix binary and JSON encoding** - only binary is supported
+5. ❌ **Don't forget TigerBeetle needs reformat** to reset data
 
 ## Reference Documentation
 
 - TigerBeetle docs: https://docs.tigerbeetle.com/
+- Two-phase transfers: https://docs.tigerbeetle.com/coding/two-phase-transfers/
 - Redis Lua scripting: https://redis.io/docs/manual/programmability/eval-intro/
-- Error codes reference: Match TigerBeetle's CreateAccountsResult and CreateTransfersResult exactly
+- Benchmark documentation: `stress_test/README_BENCHMARKS.md`
+- Test documentation: `tests/README.md`

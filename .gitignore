@@ -3,3 +3,6 @@ third_party/*
 stress_test/*_test
 tests/__pycache__/
 *.rdb
+stress_test/benchmark_results*
+logs/
+

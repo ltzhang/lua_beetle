@@ -165,6 +165,9 @@ func BenchmarkBasicBatchLuaBeetleParallel(b *testing.B) {
 
 	b.StopTimer()
 
+	// Report custom metrics: transfers per operation
+	b.ReportMetric(float64(100), "transfers/op")
+
 	finalTotalTransferred := atomic.LoadUint64(&totalTransferred)
 
 	// Verify final balances

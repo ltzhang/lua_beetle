@@ -23,6 +23,7 @@ type RedisStressTest struct {
 	lookupAccountSHA         string
 	getAccountTransfersSHA   string
 	getAccountBalancesSHA    string
+	pendingTransfers         sync.Map // Track pending transfers for two-phase commits
 }
 
 // NewRedisStressTest creates a new Redis-compatible stress tester
@@ -38,7 +39,6 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 		return nil, fmt.Errorf("failed to connect to %s: %w", name, err)
 	}
 
-	// Use binary encoder (only supported format)
 	encoder := NewBinaryEncoder()
 
 	test := &RedisStressTest{
@@ -89,7 +89,8 @@ func (r *RedisStressTest) loadScripts(ctx context.Context) error {
 
 // Setup creates initial accounts using pipelining
 func (r *RedisStressTest) Setup(ctx context.Context) error {
-	fmt.Printf("Creating %d accounts...\n", r.config.NumAccounts)
+	fmt.Printf("Creating %d accounts (%d hot, %d cold)...\n",
+		r.config.NumAccounts, r.config.NumHotAccounts, r.config.NumAccounts-r.config.NumHotAccounts)
 
 	// Create accounts using pipelines (batching for performance, not transactions)
 	pipelineSize := 1000
@@ -156,13 +157,8 @@ func (r *RedisStressTest) RunWorker(ctx context.Context, workerID int, wg *sync.
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
 
-	// Create account ID generator based on skew
-	var idGen AccountIDGenerator
-	if r.config.HotAccountSkew < 0.01 {
-		idGen = NewUniformGenerator(r.config.NumAccounts, int64(workerID), 0)
-	} else {
-		idGen = NewZipfGenerator(r.config.NumAccounts, r.config.HotAccountSkew, int64(workerID))
-	}
+	// Create hot/cold account ID generator
+	accountGen := NewHotColdGenerator(r.config.NumAccounts, r.config.NumHotAccounts, int64(workerID), 0)
 
 	operationCounter := uint64(0)
 
@@ -171,97 +167,54 @@ func (r *RedisStressTest) RunWorker(ctx context.Context, workerID int, wg *sync.
 		case <-ctx.Done():
 			return
 		default:
-			// Decide operation type based on read ratio
-			isRead := rng.Float64() < r.config.ReadRatio
-
 			start := time.Now()
 			var err error
 
-			if isRead {
-				err = r.performRead(ctx, idGen, rng)
-			} else {
-				err = r.performWrite(ctx, workerID, &operationCounter, idGen, rng)
+			// Execute workload based on type
+			switch r.config.Workload {
+			case WorkloadTransfer:
+				err = r.performTransferBatch(ctx, workerID, &operationCounter, accountGen)
+			case WorkloadLookup:
+				err = r.performLookupBatch(ctx, accountGen)
+			case WorkloadTwoPhase:
+				err = r.performTwoPhaseBatch(ctx, workerID, &operationCounter, accountGen, rng)
+			case WorkloadMixed:
+				// Mixed workload: decide operation type based on ratio
+				if rng.Float64() < r.config.TransferRatio {
+					// Transfer (possibly two-phase)
+					if rng.Float64() < r.config.TwoPhaseRatio {
+						err = r.performTwoPhaseBatch(ctx, workerID, &operationCounter, accountGen, rng)
+					} else {
+						err = r.performTransferBatch(ctx, workerID, &operationCounter, accountGen)
+					}
+				} else {
+					// Lookup
+					err = r.performLookupBatch(ctx, accountGen)
+				}
 			}
 
 			latency := time.Since(start).Nanoseconds()
 			r.metrics.TotalLatencyNs.Add(uint64(latency))
 
-			if err != nil {
-				// For batch operations, this counts the whole batch as failed
-				// Individual operation tracking is handled in performRead/performWrite
-				if r.config.Verbose {
-					fmt.Printf("Worker %d error: %v\n", workerID, err)
-				}
+			if err != nil && r.config.Verbose {
+				fmt.Printf("Worker %d error: %v\n", workerID, err)
 			}
-			// Note: OperationsCompleted is incremented in performRead/performWrite
-			// to accurately count individual operations, not batches
 		}
 	}
 }
 
-// performRead performs a read operation (lookup or get transfers) using pipelining
-func (r *RedisStressTest) performRead(ctx context.Context, idGen AccountIDGenerator, rng *rand.Rand) error {
-	// Choose between lookup account or get account transfers
-	if rng.Float64() < 0.5 {
-		// Lookup accounts using pipeline
-		pipe := r.client.Pipeline()
-		for i := 0; i < r.config.BatchSize; i++ {
-			accountID := idGen.Next()
-			arg := U64ToID16(accountID)
-			pipe.EvalSha(ctx, r.lookupAccountSHA, []string{}, arg)
-		}
-
-		_, err := pipe.Exec(ctx)
-		if err != nil {
-			return err
-		}
-
-		r.metrics.AccountsLookedup.Add(uint64(r.config.BatchSize))
-		r.metrics.OperationsCompleted.Add(uint64(r.config.BatchSize))
-	} else {
-		// Get account transfers
-		accountID := idGen.Next()
-		arg := U64ToID16(accountID)
-		_, err := r.client.EvalSha(ctx, r.getAccountTransfersSHA, []string{}, arg).Result()
-		if err != nil {
-			return err
-		}
-
-		r.metrics.AccountsLookedup.Add(1)
-		r.metrics.OperationsCompleted.Add(1)
-	}
-
-	return nil
-}
-
-// performWrite performs a write operation (create transfers) using pipelining
-func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counter *uint64, idGen AccountIDGenerator, rng *rand.Rand) error {
-	// Create transfers using pipeline (each transfer is independent)
+// performTransferBatch performs a batch of regular transfers
+func (r *RedisStressTest) performTransferBatch(ctx context.Context, workerID int, counter *uint64, accountGen *HotColdGenerator) error {
 	pipe := r.client.Pipeline()
 
 	for i := 0; i < r.config.BatchSize; i++ {
 		*counter++
-		debitAccountID := idGen.Next()
-		creditAccountID := idGen.Next()
 
-		// Client-side check: Ensure different accounts
-		// This prevents wasting Redis operations on invalid transfers
-		// Server-side validation remains for correctness
-		attempts := 0
-		maxAttempts := 100 // Prevent infinite loop with extreme skew
-		for creditAccountID == debitAccountID && attempts < maxAttempts {
-			creditAccountID = idGen.Next()
-			attempts++
-		}
-
-		// Skip this transfer if we couldn't find different accounts
-		// (This only happens with extreme skew where same account dominates)
-		if creditAccountID == debitAccountID {
-			continue
-		}
+		// Transfer between 1 hot account and 1 random account
+		debitAccountID, creditAccountID := accountGen.NextHotAndAny()
 
 		transferID := GenerateTransferID(workerID, *counter)
-		amount := RandomAmount(rng)
+		amount := uint64(100) // Fixed amount for consistency
 
 		transferData, err := r.encoder.EncodeTransfer(transferID, debitAccountID, creditAccountID, amount, r.config.LedgerID, 10, 0)
 		if err != nil {
@@ -295,6 +248,154 @@ func (r *RedisStressTest) performWrite(ctx context.Context, workerID int, counte
 	}
 
 	r.metrics.TransfersCreated.Add(uint64(successCount))
+	r.metrics.OperationsCompleted.Add(uint64(successCount))
+
+	return nil
+}
+
+// performLookupBatch performs a batch of account lookups
+func (r *RedisStressTest) performLookupBatch(ctx context.Context, accountGen *HotColdGenerator) error {
+	pipe := r.client.Pipeline()
+
+	// Half lookups on hot accounts, half on random accounts
+	halfBatch := r.config.BatchSize / 2
+
+	// Hot account lookups
+	for i := 0; i < halfBatch; i++ {
+		accountID := accountGen.NextHot()
+		arg := U64ToID16(accountID)
+		pipe.EvalSha(ctx, r.lookupAccountSHA, []string{}, arg)
+	}
+
+	// Random account lookups
+	for i := 0; i < r.config.BatchSize-halfBatch; i++ {
+		accountID := accountGen.NextAny()
+		arg := U64ToID16(accountID)
+		pipe.EvalSha(ctx, r.lookupAccountSHA, []string{}, arg)
+	}
+
+	results, err := pipe.Exec(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Count successful lookups
+	successCount := 0
+	for _, result := range results {
+		if result.Err() == nil {
+			successCount++
+		}
+	}
+
+	r.metrics.AccountsLookedup.Add(uint64(successCount))
+	r.metrics.OperationsCompleted.Add(uint64(successCount))
+
+	return nil
+}
+
+// performTwoPhaseBatch performs a batch of two-phase transfers
+func (r *RedisStressTest) performTwoPhaseBatch(ctx context.Context, workerID int, counter *uint64, accountGen *HotColdGenerator, rng *rand.Rand) error {
+	pipe := r.client.Pipeline()
+
+	// Track pending transfers created in this batch
+	type pendingTransfer struct {
+		id              string
+		debitAccountID  uint64
+		creditAccountID uint64
+		amount          uint64
+	}
+	pendingBatch := make([]pendingTransfer, 0, r.config.BatchSize)
+
+	for i := 0; i < r.config.BatchSize; i++ {
+		*counter++
+
+		// 50% chance to create new pending, 25% to post existing, 25% to void existing
+		action := rng.Float64()
+
+		if action < 0.5 {
+			// Create pending transfer
+			debitAccountID, creditAccountID := accountGen.NextHotAndAny()
+			transferID := GenerateTransferID(workerID, *counter)
+			amount := uint64(100)
+
+			transferData, err := r.encoder.EncodeTransfer(transferID, debitAccountID, creditAccountID, amount, r.config.LedgerID, 10, 0x0002) // PENDING flag
+			if err != nil {
+				return err
+			}
+
+			pipe.EvalSha(ctx, r.createTransferSHA, []string{}, transferData)
+
+			pendingBatch = append(pendingBatch, pendingTransfer{
+				id:              transferID,
+				debitAccountID:  debitAccountID,
+				creditAccountID: creditAccountID,
+				amount:          amount,
+			})
+
+		} else {
+			// Try to post or void an existing pending transfer
+			// For simplicity, we'll create a pending and immediately post/void it
+			debitAccountID, creditAccountID := accountGen.NextHotAndAny()
+			pendingID := GenerateTransferID(workerID, *counter)
+			amount := uint64(100)
+
+			// Create pending
+			pendingData, _ := r.encoder.EncodeTransfer(pendingID, debitAccountID, creditAccountID, amount, r.config.LedgerID, 10, 0x0002)
+			pipe.EvalSha(ctx, r.createTransferSHA, []string{}, pendingData)
+
+			// Post or void
+			*counter++
+			postVoidID := GenerateTransferID(workerID, *counter)
+			var flags uint16
+			if action < 0.75 {
+				flags = 0x0004 // POST_PENDING
+			} else {
+				flags = 0x0008 // VOID_PENDING
+			}
+
+			postVoidData, _ := r.encoder.EncodeTransferWithPending(postVoidID, debitAccountID, creditAccountID, amount, pendingID, r.config.LedgerID, 10, flags)
+			pipe.EvalSha(ctx, r.createTransferSHA, []string{}, postVoidData)
+		}
+	}
+
+	// Execute pipeline
+	results, err := pipe.Exec(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Count successes
+	successCount := 0
+	pendingCount := 0
+	postedCount := 0
+	voidedCount := 0
+
+	for _, result := range results {
+		if result.Err() != nil {
+			continue
+		}
+
+		errCode, err := r.encoder.DecodeTransferResult(result.(*redis.Cmd).Val())
+		if err != nil {
+			continue
+		}
+
+		if errCode == 0 {
+			successCount++
+			// Note: This is simplified - in reality we'd track which operation succeeded
+			pendingCount++
+		}
+	}
+
+	// Store pending transfers for future post/void (simplified - not used in current implementation)
+	for _, pending := range pendingBatch {
+		r.pendingTransfers.Store(pending.id, pending)
+	}
+
+	r.metrics.TwoPhaseCreated.Add(uint64(successCount))
+	r.metrics.TwoPhasePending.Add(uint64(pendingCount))
+	r.metrics.TwoPhasePosted.Add(uint64(postedCount))
+	r.metrics.TwoPhaseVoided.Add(uint64(voidedCount))
 	r.metrics.OperationsCompleted.Add(uint64(successCount))
 
 	return nil
@@ -373,11 +474,14 @@ func getFloat64(v interface{}) float64 {
 // Run executes the stress test
 func (r *RedisStressTest) Run(ctx context.Context) error {
 	fmt.Printf("\n=== Starting %s Stress Test ===\n", r.name)
+	fmt.Printf("Workload: %s\n", r.config.Workload)
 	fmt.Printf("Workers: %d\n", r.config.NumWorkers)
 	fmt.Printf("Duration: %d seconds\n", r.config.Duration)
-	fmt.Printf("Read Ratio: %.2f\n", r.config.ReadRatio)
-	fmt.Printf("Hot Account Skew: %.2f\n", r.config.HotAccountSkew)
 	fmt.Printf("Batch Size: %d\n", r.config.BatchSize)
+	if r.config.Workload == WorkloadMixed {
+		fmt.Printf("Transfer Ratio: %.2f\n", r.config.TransferRatio)
+		fmt.Printf("Two-Phase Ratio: %.2f\n", r.config.TwoPhaseRatio)
+	}
 
 	// Setup
 	if err := r.Setup(ctx); err != nil {

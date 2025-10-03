@@ -3,99 +3,94 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
 	"math/rand"
 	"sync/atomic"
 	"time"
 )
 
+// WorkloadType defines the type of workload to run
+type WorkloadType string
+
+const (
+	WorkloadTransfer   WorkloadType = "transfer"
+	WorkloadLookup     WorkloadType = "lookup"
+	WorkloadTwoPhase   WorkloadType = "twophase"
+	WorkloadMixed      WorkloadType = "mixed"
+)
+
 // StressTestConfig defines parameters for the stress test
 type StressTestConfig struct {
-	NumAccounts    int     // Total number of accounts to create
-	NumWorkers     int     // Number of concurrent workers
-	Duration       int     // Test duration in seconds
-	ReadRatio      float64 // Ratio of read operations (0.0-1.0)
-	HotAccountSkew float64 // Zipf skew parameter (0=uniform, 1+=skewed, typically 0.99)
-	BatchSize      int     // Number of operations per batch
-	LedgerID       uint32  // Ledger ID for all accounts/transfers
-	Verbose        bool    // Enable verbose output
+	NumAccounts    int          // Total number of accounts to create
+	NumHotAccounts int          // Number of hot accounts (rest are cold)
+	NumWorkers     int          // Number of concurrent workers
+	Duration       int          // Test duration in seconds
+	Workload       WorkloadType // Type of workload to run
+	TransferRatio  float64      // For mixed workload: ratio of transfers (rest are lookups)
+	TwoPhaseRatio  float64      // For mixed workload: ratio of two-phase transfers within transfers
+	BatchSize      int          // Number of operations per batch
+	LedgerID       uint32       // Ledger ID for all accounts/transfers
+	Verbose        bool         // Enable verbose output
 }
 
 // TestMetrics tracks performance metrics
 type TestMetrics struct {
-	OperationsCompleted atomic.Uint64
-	OperationsFailed    atomic.Uint64
-	TransfersCreated    atomic.Uint64
-	AccountsLookedup    atomic.Uint64
-	TotalLatencyNs      atomic.Uint64
-	StartTime           time.Time
-	EndTime             time.Time
+	OperationsCompleted  atomic.Uint64
+	OperationsFailed     atomic.Uint64
+	TransfersCreated     atomic.Uint64
+	TwoPhaseCreated      atomic.Uint64
+	TwoPhasePending      atomic.Uint64
+	TwoPhasePosted       atomic.Uint64
+	TwoPhaseVoided       atomic.Uint64
+	AccountsLookedup     atomic.Uint64
+	TotalLatencyNs       atomic.Uint64
+	StartTime            time.Time
+	EndTime              time.Time
 }
 
-// ZipfGenerator generates account IDs with Zipf distribution
-type ZipfGenerator struct {
-	rng    *rand.Rand
-	zipf   *rand.Zipf
-	offset uint64
+// HotColdGenerator generates account IDs with hot/cold distribution
+type HotColdGenerator struct {
+	rng            *rand.Rand
+	numAccounts    int
+	numHotAccounts int
+	offset         uint64
 }
 
-// NewZipfGenerator creates a new Zipf distribution generator
-func NewZipfGenerator(numAccounts int, skew float64, seed int64) *ZipfGenerator {
-	source := rand.NewSource(seed)
-	rng := rand.New(source)
-
-	// Zipf requires s > 1, v >= 1
-	// We map skew parameter to s: skew=0 -> uniform, skew=0.99 -> Zipf(s=2)
-	s := 1.0 + skew*10.0
-	if s <= 1.0 {
-		s = 1.01
-	}
-
-	zipf := rand.NewZipf(rng, s, 1.0, uint64(numAccounts)-1)
-
-	return &ZipfGenerator{
-		rng:    rng,
-		zipf:   zipf,
-		offset: 0,
+// NewHotColdGenerator creates a hot/cold distribution generator
+func NewHotColdGenerator(numAccounts, numHotAccounts int, seed int64, offset uint64) *HotColdGenerator {
+	return &HotColdGenerator{
+		rng:            rand.New(rand.NewSource(seed)),
+		numAccounts:    numAccounts,
+		numHotAccounts: numHotAccounts,
+		offset:         offset,
 	}
 }
 
-// Next returns the next account ID according to distribution
-func (z *ZipfGenerator) Next() uint64 {
-	if z.zipf == nil {
-		// Uniform distribution
-		return uint64(z.rng.Intn(int(math.MaxInt64))) % (uint64(1<<63) - 1)
+// NextHot returns a random hot account ID
+func (h *HotColdGenerator) NextHot() uint64 {
+	return uint64(h.rng.Intn(h.numHotAccounts)) + 1 + h.offset
+}
+
+// NextAny returns a random account ID (hot or cold)
+func (h *HotColdGenerator) NextAny() uint64 {
+	return uint64(h.rng.Intn(h.numAccounts)) + 1 + h.offset
+}
+
+// NextHotAndAny returns a pair: one hot account and one random account
+// Ensures they are different
+func (h *HotColdGenerator) NextHotAndAny() (hot uint64, any uint64) {
+	hot = h.NextHot()
+	any = h.NextAny()
+
+	// Ensure different accounts (max 100 attempts)
+	attempts := 0
+	for any == hot && attempts < 100 {
+		any = h.NextAny()
+		attempts++
 	}
-	// Zipf distribution - returns 0 to numAccounts-1
-	// We offset by 1 since account IDs start at 1
-	return z.zipf.Uint64() + 1 + z.offset
+
+	return hot, any
 }
 
-// UniformGenerator generates uniformly distributed account IDs
-type UniformGenerator struct {
-	rng        *rand.Rand
-	numAccounts int
-	offset     uint64
-}
-
-// NewUniformGenerator creates a uniform distribution generator
-func NewUniformGenerator(numAccounts int, seed int64, offset uint64) *UniformGenerator {
-	return &UniformGenerator{
-		rng:        rand.New(rand.NewSource(seed)),
-		numAccounts: numAccounts,
-		offset:     offset,
-	}
-}
-
-// Next returns the next uniformly distributed account ID
-func (u *UniformGenerator) Next() uint64 {
-	return uint64(u.rng.Intn(u.numAccounts)) + 1 + u.offset
-}
-
-// AccountIDGenerator interface for different distribution strategies
-type AccountIDGenerator interface {
-	Next() uint64
-}
 
 // PrintMetrics prints the final metrics
 func PrintMetrics(metrics *TestMetrics, testName string) {
@@ -103,6 +98,10 @@ func PrintMetrics(metrics *TestMetrics, testName string) {
 	completed := metrics.OperationsCompleted.Load()
 	failed := metrics.OperationsFailed.Load()
 	transfers := metrics.TransfersCreated.Load()
+	twoPhaseTotal := metrics.TwoPhaseCreated.Load()
+	twoPhasePending := metrics.TwoPhasePending.Load()
+	twoPhasePosted := metrics.TwoPhasePosted.Load()
+	twoPhaseVoided := metrics.TwoPhaseVoided.Load()
 	lookups := metrics.AccountsLookedup.Load()
 	totalLatency := metrics.TotalLatencyNs.Load()
 
@@ -117,6 +116,10 @@ func PrintMetrics(metrics *TestMetrics, testName string) {
 	fmt.Printf("Operations Completed: %d\n", completed)
 	fmt.Printf("Operations Failed: %d\n", failed)
 	fmt.Printf("Transfers Created: %d\n", transfers)
+	if twoPhaseTotal > 0 {
+		fmt.Printf("Two-Phase Transfers: %d (Pending: %d, Posted: %d, Voided: %d)\n",
+			twoPhaseTotal, twoPhasePending, twoPhasePosted, twoPhaseVoided)
+	}
 	fmt.Printf("Accounts Looked Up: %d\n", lookups)
 	fmt.Printf("Throughput: %.2f ops/sec\n", throughput)
 	fmt.Printf("Average Latency: %.2f ms\n", avgLatencyMs)

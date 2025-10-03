@@ -10,12 +10,14 @@ import (
 
 func main() {
 	// Command line flags
-	mode := flag.String("mode", "redis", "Test mode: redis, dragonfly, tigerbeetle, or all")
+	mode := flag.String("mode", "redis", "Test mode: redis, dragonfly, eloqkv, tigerbeetle, or all")
 	numAccounts := flag.Int("accounts", 10000, "Number of accounts to create")
+	numHotAccounts := flag.Int("hot-accounts", 100, "Number of hot accounts")
 	numWorkers := flag.Int("workers", 10, "Number of concurrent workers")
 	duration := flag.Int("duration", 60, "Test duration in seconds")
-	readRatio := flag.Float64("read-ratio", 0.5, "Ratio of read operations (0.0-1.0)")
-	hotAccountSkew := flag.Float64("skew", 0.0, "Hot account skew (0=uniform, 0.99=very skewed)")
+	workload := flag.String("workload", "transfer", "Workload type: transfer, lookup, twophase, or mixed")
+	transferRatio := flag.Float64("transfer-ratio", 0.7, "For mixed workload: ratio of transfers (0.0-1.0)")
+	twoPhaseRatio := flag.Float64("twophase-ratio", 0.1, "For mixed workload: ratio of two-phase transfers within transfers (0.0-1.0)")
 	batchSize := flag.Int("batch", 100, "Operations per batch")
 	ledgerID := flag.Int("ledger", 700, "Ledger ID")
 	verbose := flag.Bool("verbose", false, "Enable verbose output")
@@ -25,13 +27,18 @@ func main() {
 	flag.Parse()
 
 	// Validate parameters
-	if *readRatio < 0.0 || *readRatio > 1.0 {
-		fmt.Fprintf(os.Stderr, "Error: read-ratio must be between 0.0 and 1.0\n")
+	if *numHotAccounts <= 0 || *numHotAccounts > *numAccounts {
+		fmt.Fprintf(os.Stderr, "Error: hot-accounts must be between 1 and %d\n", *numAccounts)
 		os.Exit(1)
 	}
 
-	if *hotAccountSkew < 0.0 {
-		fmt.Fprintf(os.Stderr, "Error: skew must be >= 0.0\n")
+	if *transferRatio < 0.0 || *transferRatio > 1.0 {
+		fmt.Fprintf(os.Stderr, "Error: transfer-ratio must be between 0.0 and 1.0\n")
+		os.Exit(1)
+	}
+
+	if *twoPhaseRatio < 0.0 || *twoPhaseRatio > 1.0 {
+		fmt.Fprintf(os.Stderr, "Error: twophase-ratio must be between 0.0 and 1.0\n")
 		os.Exit(1)
 	}
 
@@ -40,12 +47,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Parse workload type
+	var workloadType WorkloadType
+	switch strings.ToLower(*workload) {
+	case "transfer":
+		workloadType = WorkloadTransfer
+	case "lookup":
+		workloadType = WorkloadLookup
+	case "twophase":
+		workloadType = WorkloadTwoPhase
+	case "mixed":
+		workloadType = WorkloadMixed
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid workload '%s'. Must be 'transfer', 'lookup', 'twophase', or 'mixed'\n", *workload)
+		os.Exit(1)
+	}
+
 	config := &StressTestConfig{
 		NumAccounts:    *numAccounts,
+		NumHotAccounts: *numHotAccounts,
 		NumWorkers:     *numWorkers,
 		Duration:       *duration,
-		ReadRatio:      *readRatio,
-		HotAccountSkew: *hotAccountSkew,
+		Workload:       workloadType,
+		TransferRatio:  *transferRatio,
+		TwoPhaseRatio:  *twoPhaseRatio,
 		BatchSize:      *batchSize,
 		LedgerID:       uint32(*ledgerID),
 		Verbose:        *verbose,
@@ -55,19 +80,14 @@ func main() {
 
 	fmt.Printf("\n=== Stress Test Configuration ===\n")
 	fmt.Printf("Mode: %s\n", *mode)
-	fmt.Printf("Accounts: %d\n", config.NumAccounts)
+	fmt.Printf("Accounts: %d total (%d hot, %d cold)\n",
+		config.NumAccounts, config.NumHotAccounts, config.NumAccounts-config.NumHotAccounts)
 	fmt.Printf("Workers: %d\n", config.NumWorkers)
 	fmt.Printf("Duration: %d seconds\n", config.Duration)
-	fmt.Printf("Read Ratio: %.2f\n", config.ReadRatio)
-	fmt.Printf("Hot Account Skew: %.2f (", config.HotAccountSkew)
-	if config.HotAccountSkew < 0.01 {
-		fmt.Printf("uniform distribution)\n")
-	} else if config.HotAccountSkew < 0.5 {
-		fmt.Printf("mild skew)\n")
-	} else if config.HotAccountSkew < 1.0 {
-		fmt.Printf("moderate skew)\n")
-	} else {
-		fmt.Printf("heavy skew)\n")
+	fmt.Printf("Workload: %s\n", config.Workload)
+	if config.Workload == WorkloadMixed {
+		fmt.Printf("  Transfer Ratio: %.2f\n", config.TransferRatio)
+		fmt.Printf("  Two-Phase Ratio: %.2f\n", config.TwoPhaseRatio)
 	}
 	fmt.Printf("Batch Size: %d\n", config.BatchSize)
 	fmt.Printf("Ledger ID: %d\n", config.LedgerID)
@@ -84,6 +104,12 @@ func main() {
 	case "dragonfly":
 		if err := runRedisTest(ctx, config, "localhost:6380", "DragonflyDB", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "DragonflyDB test failed: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "eloqkv":
+		if err := runRedisTest(ctx, config, "localhost:6379", "EloqKV", *noCleanup); err != nil {
+			fmt.Fprintf(os.Stderr, "EloqKV test failed: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -136,7 +162,7 @@ func main() {
 		}
 
 	default:
-		fmt.Fprintf(os.Stderr, "Error: invalid mode '%s'. Must be 'redis', 'dragonfly', 'tigerbeetle', 'both', or 'all'\n", *mode)
+		fmt.Fprintf(os.Stderr, "Error: invalid mode '%s'. Must be 'redis', 'dragonfly', 'eloqkv', 'tigerbeetle', 'both', or 'all'\n", *mode)
 		os.Exit(1)
 	}
 

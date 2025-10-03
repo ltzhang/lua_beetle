@@ -51,8 +51,10 @@ local IMPORTED_FLAG = 0x0002
 -- Only set timestamp if imported flag is NOT set
 if (flags % 4) < 2 then
     -- imported flag is NOT set, server sets timestamp
-    local timestamp = redis.call('TIME')
-    local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+    -- TODO: EloqKV doesn't support TIME command in Lua scripts, using arbitrary timestamp
+    -- local timestamp = redis.call('TIME')
+    -- local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+    local ts = 1000000000000000000  -- Arbitrary timestamp for EloqKV compatibility
 
     account_with_ts = string.sub(account_data, 1, 120) ..
                       string.char(

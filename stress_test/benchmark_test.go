@@ -163,6 +163,9 @@ func BenchmarkBasicBatchLuaBeetle(b *testing.B) {
 
 	b.StopTimer()
 
+	// Report custom metrics: transfers per operation
+	b.ReportMetric(float64(1000), "transfers/op")
+
 	// Verify balances at the end
 	account1Data, _ := client.EvalSha(ctx, lookupAccountScript, []string{}, U64ToID16(accountID1)).Result()
 	account2Data, _ := client.EvalSha(ctx, lookupAccountScript, []string{}, U64ToID16(accountID2)).Result()

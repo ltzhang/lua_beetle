@@ -32,8 +32,10 @@ local chain_start = nil
 local created_accounts = {}
 
 -- Get timestamp once for all accounts (will be used for non-imported accounts)
-local timestamp = redis.call('TIME')
-local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+-- TODO: EloqKV doesn't support TIME command in Lua scripts, using arbitrary timestamp
+-- local timestamp = redis.call('TIME')
+-- local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
+local ts = 1000000000000000000  -- Arbitrary timestamp for EloqKV compatibility
 local ts_bytes = string.char(
     ts % 256,
     math.floor(ts / 256) % 256,
