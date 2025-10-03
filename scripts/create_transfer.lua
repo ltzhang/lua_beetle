@@ -273,16 +273,49 @@ else
     transfer_with_ts = transfer_data
 end
 
--- Write everything in 3 operations (minimal round trips)
+-- Write accounts and transfer
 redis.call('SET', debit_key, new_debit_account)
 redis.call('SET', credit_key, new_credit_account)
 redis.call('SET', transfer_key, transfer_with_ts)
 
--- Add to secondary indexes (simple append, no ordering)
+-- Add to transfer indexes (simple append, sorting done at query time)
+-- Append raw 16-byte transfer_id (fixed-size for easy rollback)
 local debit_index = "account:" .. debit_account_id .. ":transfers"
 local credit_index = "account:" .. credit_account_id .. ":transfers"
-redis.call('APPEND', debit_index, transfer_id)
-redis.call('APPEND', credit_index, transfer_id)
+redis.call('APPEND', debit_index, transfer_id_raw)
+redis.call('APPEND', credit_index, transfer_id_raw)
+
+-- Update balance history if accounts have HISTORY flag
+local ACCOUNT_FLAG_HISTORY = 0x08
+local debit_has_history = (math.floor(debit_flags / ACCOUNT_FLAG_HISTORY) % 2) == 1
+local credit_has_history = (math.floor(credit_flags / ACCOUNT_FLAG_HISTORY) % 2) == 1
+
+-- Helper: encode AccountBalance (64 bytes)
+local function encode_account_balance(account_data, transfer_ts)
+    -- Extract timestamp from transfer_with_ts
+    local ts_bytes = string.sub(transfer_with_ts, 121, 128)
+
+    -- Extract balance fields from account (128 bytes)
+    local debits_pending = string.sub(account_data, 17, 32)   -- offset 16, 16 bytes
+    local debits_posted = string.sub(account_data, 33, 48)    -- offset 32, 16 bytes
+    local credits_pending = string.sub(account_data, 49, 64)  -- offset 48, 16 bytes
+    local credits_posted = string.sub(account_data, 65, 80)   -- offset 64, 16 bytes
+
+    -- Return 64-byte AccountBalance: timestamp + balances
+    return ts_bytes .. debits_pending .. debits_posted .. credits_pending .. credits_posted
+end
+
+if debit_has_history then
+    local debit_balance = encode_account_balance(new_debit_account, transfer_with_ts)
+    local debit_balance_index = "account:" .. debit_account_id .. ":balance_history"
+    redis.call('APPEND', debit_balance_index, debit_balance)
+end
+
+if credit_has_history then
+    local credit_balance = encode_account_balance(new_credit_account, transfer_with_ts)
+    local credit_balance_index = "account:" .. credit_account_id .. ":balance_history"
+    redis.call('APPEND', credit_balance_index, credit_balance)
+end
 
 -- Return success
 return string.char(0) .. string.rep('\0', 127)

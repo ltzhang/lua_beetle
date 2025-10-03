@@ -78,7 +78,7 @@ local ts_bytes = string.char(
 local results = {}
 local chain_start = nil
 local modified_accounts = {}
-local created_transfers = {}
+local index_original_lengths = {} -- Track original lengths for rollback
 
 local FLAG_PENDING = 0x0002
 local FLAG_IMPORTED = 0x0010
@@ -202,6 +202,17 @@ for i = 0, num_transfers - 1 do
                 end
             end
 
+            -- Rollback indexes by truncating to original lengths
+            for key, original_len in pairs(index_original_lengths) do
+                if original_len == 0 then
+                    redis.call('DEL', key)
+                else
+                    -- Truncate by getting the prefix and setting it back
+                    local truncated = redis.call('GETRANGE', key, 0, original_len - 1)
+                    redis.call('SET', key, truncated)
+                end
+            end
+
             -- Mark all in chain as failed
             for j = chain_start, i do
                 if j == i then
@@ -213,6 +224,7 @@ for i = 0, num_transfers - 1 do
 
             chain_start = nil
             modified_accounts = {}
+            index_original_lengths = {}
         else
             table.insert(results, string.char(error_code) .. string.rep('\0', 127))
         end
@@ -245,9 +257,71 @@ for i = 0, num_transfers - 1 do
         redis.call('SET', credit_key, new_credit_account)
         redis.call('SET', transfer_key, transfer_with_ts)
 
-        -- Add to indexes
+        -- Track original lengths for potential rollback
+        if chain_start ~= nil then
+            local debit_transfers_key = "account:" .. debit_account_id .. ":transfers"
+            local credit_transfers_key = "account:" .. credit_account_id .. ":transfers"
+
+            if not index_original_lengths[debit_transfers_key] then
+                index_original_lengths[debit_transfers_key] = redis.call('STRLEN', debit_transfers_key)
+            end
+            if not index_original_lengths[credit_transfers_key] then
+                index_original_lengths[credit_transfers_key] = redis.call('STRLEN', credit_transfers_key)
+            end
+        end
+
+        -- Add to transfer indexes (simple append, sorting done at query time)
+        -- Append raw 16-byte transfer_id (fixed-size for easy rollback)
         redis.call('APPEND', "account:" .. debit_account_id .. ":transfers", transfer_id)
         redis.call('APPEND', "account:" .. credit_account_id .. ":transfers", transfer_id)
+
+        -- Update balance history if accounts have HISTORY flag
+        local ACCOUNT_FLAG_HISTORY = 0x08
+        local debit_flags_val = string.byte(debit_account, 119) + string.byte(debit_account, 120) * 256
+        local credit_flags_val = string.byte(credit_account, 119) + string.byte(credit_account, 120) * 256
+        local debit_has_history = (math.floor(debit_flags_val / ACCOUNT_FLAG_HISTORY) % 2) == 1
+        local credit_has_history = (math.floor(credit_flags_val / ACCOUNT_FLAG_HISTORY) % 2) == 1
+
+        -- Helper: encode AccountBalance (64 bytes)
+        local function encode_account_balance(account_data, transfer_ts)
+            -- Extract timestamp from transfer_with_ts
+            local ts_bytes = string.sub(transfer_with_ts, 121, 128)
+
+            -- Extract balance fields from account (128 bytes)
+            local debits_pending = string.sub(account_data, 17, 32)   -- offset 16, 16 bytes
+            local debits_posted = string.sub(account_data, 33, 48)    -- offset 32, 16 bytes
+            local credits_pending = string.sub(account_data, 49, 64)  -- offset 48, 16 bytes
+            local credits_posted = string.sub(account_data, 65, 80)   -- offset 64, 16 bytes
+
+            -- Return 64-byte AccountBalance: timestamp + balances
+            return ts_bytes .. debits_pending .. debits_posted .. credits_pending .. credits_posted
+        end
+
+        if debit_has_history then
+            -- Track original length for potential rollback
+            if chain_start ~= nil then
+                local debit_balance_key = "account:" .. debit_account_id .. ":balance_history"
+                if not index_original_lengths[debit_balance_key] then
+                    index_original_lengths[debit_balance_key] = redis.call('STRLEN', debit_balance_key)
+                end
+            end
+
+            local debit_balance = encode_account_balance(new_debit_account, transfer_with_ts)
+            redis.call('APPEND', "account:" .. debit_account_id .. ":balance_history", debit_balance)
+        end
+
+        if credit_has_history then
+            -- Track original length for potential rollback
+            if chain_start ~= nil then
+                local credit_balance_key = "account:" .. credit_account_id .. ":balance_history"
+                if not index_original_lengths[credit_balance_key] then
+                    index_original_lengths[credit_balance_key] = redis.call('STRLEN', credit_balance_key)
+                end
+            end
+
+            local credit_balance = encode_account_balance(new_credit_account, transfer_with_ts)
+            redis.call('APPEND', "account:" .. credit_account_id .. ":balance_history", credit_balance)
+        end
 
         table.insert(results, string.char(0) .. string.rep('\0', 127)) -- ERR_OK
 
@@ -255,6 +329,7 @@ for i = 0, num_transfers - 1 do
         if not is_linked and chain_start ~= nil then
             chain_start = nil
             modified_accounts = {}
+            index_original_lengths = {}
         end
     end
 end
@@ -275,6 +350,17 @@ if chain_start ~= nil then
         end
         if modified_accounts[rb_credit_id] then
             redis.call('SET', "account:" .. rb_credit_id, modified_accounts[rb_credit_id])
+        end
+    end
+
+    -- Rollback indexes by truncating to original lengths
+    for key, original_len in pairs(index_original_lengths) do
+        if original_len == 0 then
+            redis.call('DEL', key)
+        else
+            -- Truncate by getting the prefix and setting it back
+            local truncated = redis.call('GETRANGE', key, 0, original_len - 1)
+            redis.call('SET', key, truncated)
         end
     end
 
