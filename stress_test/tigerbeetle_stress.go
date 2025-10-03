@@ -214,16 +214,16 @@ func (t *TigerBeetleStressTest) performLookupBatch(ctx context.Context, accountG
 
 // performTwoPhaseBatch performs a batch of two-phase transfers
 func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, workerID int, counter *uint64, accountGen *HotColdGenerator, rng *rand.Rand) error {
-	transfers := make([]types.Transfer, 0, t.config.BatchSize)
-
-	// Track pending transfers created in this batch
+	// Track pending transfers for post/void
 	type pendingTransfer struct {
 		id              types.Uint128
 		debitAccountID  uint64
 		creditAccountID uint64
 		amount          uint64
 	}
-	pendingBatch := make([]pendingTransfer, 0)
+
+	pendingToCreate := make([]types.Transfer, 0, t.config.BatchSize)
+	postVoidToCreate := make([]types.Transfer, 0, t.config.BatchSize)
 
 	for i := 0; i < t.config.BatchSize; i++ {
 		*counter++
@@ -237,7 +237,7 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 			transferID := types.ToUint128(hashStringToU64(GenerateTransferID(workerID, *counter)))
 			amount := uint64(100)
 
-			transfers = append(transfers, types.Transfer{
+			pendingToCreate = append(pendingToCreate, types.Transfer{
 				ID:              transferID,
 				DebitAccountID:  types.ToUint128(debitAccountID),
 				CreditAccountID: types.ToUint128(creditAccountID),
@@ -247,7 +247,8 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 				Flags:           types.TransferFlags{Pending: true}.ToUint16(),
 			})
 
-			pendingBatch = append(pendingBatch, pendingTransfer{
+			// Store for future post/void
+			t.pendingTransfers.Store(transferID, pendingTransfer{
 				id:              transferID,
 				debitAccountID:  debitAccountID,
 				creditAccountID: creditAccountID,
@@ -256,13 +257,13 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 
 		} else {
 			// Try to post or void an existing pending transfer
-			// For simplicity, we'll create a pending and immediately post/void it
+			// Create a pending first, then post/void it in separate batches
 			debitAccountID, creditAccountID := accountGen.NextHotAndAny()
 			pendingID := types.ToUint128(hashStringToU64(GenerateTransferID(workerID, *counter)))
 			amount := uint64(100)
 
-			// Create pending
-			transfers = append(transfers, types.Transfer{
+			// Create pending first
+			pendingToCreate = append(pendingToCreate, types.Transfer{
 				ID:              pendingID,
 				DebitAccountID:  types.ToUint128(debitAccountID),
 				CreditAccountID: types.ToUint128(creditAccountID),
@@ -272,7 +273,7 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 				Flags:           types.TransferFlags{Pending: true}.ToUint16(),
 			})
 
-			// Post or void
+			// Post or void (will be executed after pending is committed)
 			*counter++
 			postVoidID := types.ToUint128(hashStringToU64(GenerateTransferID(workerID, *counter)))
 			var flags types.TransferFlags
@@ -282,7 +283,7 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 				flags = types.TransferFlags{VoidPendingTransfer: true}
 			}
 
-			transfers = append(transfers, types.Transfer{
+			postVoidToCreate = append(postVoidToCreate, types.Transfer{
 				ID:              postVoidID,
 				DebitAccountID:  types.ToUint128(debitAccountID),
 				CreditAccountID: types.ToUint128(creditAccountID),
@@ -295,22 +296,27 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 		}
 	}
 
-	results, err := t.client.CreateTransfers(transfers)
-	if err != nil {
-		return err
+	// Execute pending transfers first
+	var successCount int
+	if len(pendingToCreate) > 0 {
+		results, err := t.client.CreateTransfers(pendingToCreate)
+		if err != nil {
+			return err
+		}
+		successCount += len(pendingToCreate) - len(results)
 	}
 
-	// Count successes
-	successCount := len(transfers) - len(results)
-
-	// Store pending transfers for future post/void (simplified)
-	for _, pending := range pendingBatch {
-		t.pendingTransfers.Store(pending.id, pending)
+	// Then execute post/void transfers
+	if len(postVoidToCreate) > 0 {
+		results, err := t.client.CreateTransfers(postVoidToCreate)
+		if err != nil {
+			return err
+		}
+		successCount += len(postVoidToCreate) - len(results)
 	}
 
-	// Note: Simplified metrics - not distinguishing between pending/posted/voided
+	// Update metrics
 	t.metrics.TwoPhaseCreated.Add(uint64(successCount))
-	t.metrics.TwoPhasePending.Add(uint64(len(pendingBatch)))
 	t.metrics.OperationsCompleted.Add(uint64(successCount))
 
 	return nil

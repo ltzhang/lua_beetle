@@ -2,24 +2,35 @@
 # Comprehensive benchmark script for Lua Beetle vs TigerBeetle
 # Tests various workloads with different hot account ratios and thread counts
 #
-# The script automatically starts and stops backend services as needed:
-# - Redis: Port 6379
-# - DragonflyDB: Port 6380
-# - EloqKV: Port 6379 (conflicts with Redis, automatically stops Redis when testing EloqKV)
-# - TigerBeetle: Port 3000
+# The script AUTOMATICALLY starts and stops all backend services:
+# - Redis: Port 6379 (auto-started)
+# - DragonflyDB: Port 6380 (auto-started)
+# - EloqKV: Port 6379 (auto-started, conflicts with Redis - automatically managed)
+# - TigerBeetle: Port 3000 (auto-started)
 #
-# All data is stored in /mnt/ramdisk/tests/ for performance
+# All database files are stored in /mnt/ramdisk/tests/ for performance
+# Results are saved in ./benchmark_results/run_YYYYMMDD_HHMMSS/
 
 set -e
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Configuration
 ACCOUNTS=100000
 DURATION=30
-BATCH_SIZE=100
-OUTPUT_DIR="benchmark_results_$(date +%Y%m%d_%H%M%S)"
+BATCH_SIZE=200
 
-# Create output directory
+# Results directory (under script location)
+RESULTS_BASE_DIR="$SCRIPT_DIR/benchmark_results"
+OUTPUT_DIR="$RESULTS_BASE_DIR/run_$(date +%Y%m%d_%H%M%S)"
+
+# Database/execution directory (ramdisk for performance)
+RAMDISK_DIR="/mnt/ramdisk/tests"
+
+# Create directories
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$RAMDISK_DIR"
 
 # Log file
 LOGFILE="$OUTPUT_DIR/benchmark.log"
@@ -34,18 +45,18 @@ start_redis() {
     killall redis-server 2>/dev/null || true
     killall eloqkv 2>/dev/null || true
     sleep 1
-    cd /mnt/ramdisk/tests
-    /home/lintaoz/database/redis/src/redis-server --dir /mnt/ramdisk/tests --daemonize yes > /dev/null 2>&1
+    cd "$RAMDISK_DIR"
+    /home/lintaoz/database/redis/src/redis-server --dir "$RAMDISK_DIR" --daemonize yes > /dev/null 2>&1
     sleep 2
     cd - > /dev/null
-    log "Redis started"
+    log "Redis started (data in $RAMDISK_DIR)"
 }
 
 # Function to reset Redis
 reset_redis() {
     log "Resetting Redis..."
     /home/lintaoz/database/redis/src/redis-cli FLUSHDB > /dev/null 2>&1 || true
-    rm -f /mnt/ramdisk/tests/dump.rdb 2>/dev/null || true
+    rm -f "$RAMDISK_DIR/dump.rdb" 2>/dev/null || true
     sleep 1
 }
 
@@ -54,20 +65,20 @@ start_dragonfly() {
     log "Starting DragonflyDB..."
     killall dragonfly-x86_64 2>/dev/null || true
     sleep 1
-    cd /mnt/ramdisk/tests
+    cd "$RAMDISK_DIR"
     /home/lintaoz/work/lua_beetle/third_party/dragonfly-x86_64 \
-        --logtostderr --port=6380 --dir=/mnt/ramdisk/tests --dbfilename=dragonfly \
+        --logtostderr --port=6380 --dir="$RAMDISK_DIR" --dbfilename=dragonfly \
         --default_lua_flags=allow-undeclared-keys > dragonfly.log 2>&1 &
     sleep 3
     cd - > /dev/null
-    log "DragonflyDB started"
+    log "DragonflyDB started (data in $RAMDISK_DIR)"
 }
 
 # Function to reset DragonflyDB
 reset_dragonfly() {
     log "Resetting DragonflyDB..."
     /home/lintaoz/database/redis/src/redis-cli -p 6380 FLUSHDB > /dev/null 2>&1 || true
-    rm -f /mnt/ramdisk/tests/dragonfly-* 2>/dev/null || true
+    rm -f "$RAMDISK_DIR/dragonfly-"* 2>/dev/null || true
     sleep 1
 }
 
@@ -77,11 +88,11 @@ start_eloqkv() {
     killall redis-server 2>/dev/null || true
     killall eloqkv 2>/dev/null || true
     sleep 1
-    cd /mnt/ramdisk/tests
+    cd "$RAMDISK_DIR"
     /home/lintaoz/work/lua_beetle/third_party/eloqkv > eloqkv.log 2>&1 &
     sleep 3
     cd - > /dev/null
-    log "EloqKV started"
+    log "EloqKV started (data in $RAMDISK_DIR)"
 }
 
 # Function to reset EloqKV
@@ -96,15 +107,13 @@ reset_tigerbeetle() {
     log "Resetting TigerBeetle..."
     killall -9 tigerbeetle 2>/dev/null || true
     sleep 2
-    # Ensure ramdisk directory exists
-    mkdir -p /mnt/ramdisk/tests
-    cd /mnt/ramdisk/tests
+    cd "$RAMDISK_DIR"
     rm -f 0_0.tigerbeetle tigerbeetle.log
     /home/lintaoz/work/lua_beetle/third_party/tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle > /dev/null 2>&1
     /home/lintaoz/work/lua_beetle/third_party/tigerbeetle start --addresses=3000 --development ./0_0.tigerbeetle > tigerbeetle.log 2>&1 &
     sleep 3
     cd - > /dev/null
-    log "TigerBeetle restarted"
+    log "TigerBeetle restarted (data in $RAMDISK_DIR)"
 }
 
 # Function to run a single benchmark
@@ -119,7 +128,7 @@ run_benchmark() {
 
     log "Running: $test_name"
 
-    # Build command
+    # Build command (must run from script directory for relative script paths)
     local cmd="./stress_test -mode=$mode -workload=$workload -accounts=$ACCOUNTS -hot-accounts=$hot_accounts -workers=$workers -duration=$DURATION -batch=$BATCH_SIZE -no-cleanup"
 
     # Add mixed workload parameters
@@ -127,13 +136,15 @@ run_benchmark() {
         cmd="$cmd -transfer-ratio=0.7 -twophase-ratio=0.2"
     fi
 
-    # Run benchmark and save output
+    # Run benchmark from script directory and save output to results directory
+    cd "$SCRIPT_DIR"
     if timeout 120 $cmd > "$output_file" 2>&1; then
         log "  ✓ Completed: $test_name"
     else
         log "  ✗ Failed: $test_name"
         echo "FAILED" >> "$output_file"
     fi
+    cd - > /dev/null
 
     # Reset database for next test
     case "$mode" in
@@ -156,17 +167,18 @@ run_benchmark() {
 HOT_ACCOUNTS=(1 10 50 100 1000 10000 100000)
 WORKLOADS=(transfer lookup twophase mixed)
 WORKERS=(1 2 4 8)
-MODES=(redis tigerbeetle)
-# Uncomment to test DragonflyDB and EloqKV (requires manual startup):
-# MODES=(redis dragonfly eloqkv tigerbeetle)
+MODES=(redis dragonfly eloqkv tigerbeetle)
 
 log "==================================================="
 log "Starting Comprehensive Benchmark Suite"
 log "==================================================="
+log "Script Directory: $SCRIPT_DIR"
+log "Results Directory: $OUTPUT_DIR"
+log "Execution/DB Directory: $RAMDISK_DIR"
+log ""
 log "Total Accounts: $ACCOUNTS"
 log "Duration per test: ${DURATION}s"
 log "Batch Size: $BATCH_SIZE"
-log "Output Directory: $OUTPUT_DIR"
 log ""
 log "Hot Account Configs: ${HOT_ACCOUNTS[*]}"
 log "Workloads: ${WORKLOADS[*]}"
