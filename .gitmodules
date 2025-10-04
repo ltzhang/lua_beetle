@@ -1,3 +1,0 @@
-[submodule "third_party/tigerbeetle-benchmarks"]
-	path = third_party/tigerbeetle-benchmarks
-	url = https://github.com/kizzx2/tigerbeetle-benchmarks.git
