@@ -290,7 +290,7 @@ local ACCOUNT_FLAG_HISTORY = 0x08
 local debit_has_history = (math.floor(debit_flags / ACCOUNT_FLAG_HISTORY) % 2) == 1
 local credit_has_history = (math.floor(credit_flags / ACCOUNT_FLAG_HISTORY) % 2) == 1
 
--- Helper: encode AccountBalance (64 bytes)
+-- Helper: encode AccountBalance (128 bytes)
 local function encode_account_balance(account_data, transfer_ts)
     -- Extract timestamp from transfer_with_ts
     local ts_bytes = string.sub(transfer_with_ts, 121, 128)
@@ -301,8 +301,9 @@ local function encode_account_balance(account_data, transfer_ts)
     local credits_pending = string.sub(account_data, 49, 64)  -- offset 48, 16 bytes
     local credits_posted = string.sub(account_data, 65, 80)   -- offset 64, 16 bytes
 
-    -- Return 64-byte AccountBalance: timestamp + balances
-    return ts_bytes .. debits_pending .. debits_posted .. credits_pending .. credits_posted
+    -- Return 128-byte AccountBalance: timestamp + balances + reserved (56 bytes of zeros)
+    local reserved = string.rep('\0', 56)
+    return ts_bytes .. debits_pending .. debits_posted .. credits_pending .. credits_posted .. reserved
 end
 
 if debit_has_history then

@@ -43,6 +43,14 @@ Transfer (128 bytes):
   [116:118] code (uint16)
   [118:120] flags (uint16)
   [120:128] timestamp (uint64)
+
+AccountBalance (128 bytes):
+  [0:8]     timestamp (uint64)
+  [8:24]    debits_pending (uint128)
+  [24:40]   debits_posted (uint128)
+  [40:56]   credits_pending (uint128)
+  [56:72]   credits_posted (uint128)
+  [72:128]  reserved (56 bytes, must be 0)
 ```
 
 **Flags:**
@@ -115,13 +123,12 @@ pgrep eloqkv
 
 ```bash
 # Start DragonflyDB with data in ramdisk
-cd /mnt/ramdisk/tests
-/home/lintaoz/work/lua_beetle/third_party/dragonfly-x86_64 \
+./third_party/dragonfly-x86_64 \
   --logtostderr \
   --port=6380 \
   --dir=/mnt/ramdisk/tests \
   --dbfilename=dragonfly.db \
-  --default_lua_flags=allow-undeclared-keys > dragonfly.log 2>&1 &
+  --default_lua_flags=allow-undeclared-keys > /mnt/ramdisk/tests/dragonfly.log 2>&1 &
 
 # Verify
 redis-cli -p 6380 ping  # Should return: PONG
@@ -138,14 +145,13 @@ pgrep -f dragonfly
 
 ```bash
 # Format and start with data in ramdisk
-cd /mnt/ramdisk/tests
-/home/lintaoz/work/lua_beetle/third_party/tigerbeetle format \
+./third_party/tigerbeetle format \
   --cluster=0 --replica=0 --replica-count=1 --development \
-  ./0_0.tigerbeetle
+  /mnt/ramdisk/tests/0_0.tigerbeetle
 
-/home/lintaoz/work/lua_beetle/third_party/tigerbeetle start \
+./third_party/tigerbeetle start \
   --addresses=3000 --development \
-  ./0_0.tigerbeetle > tigerbeetle.log 2>&1 &
+  /mnt/ramdisk/tests/0_0.tigerbeetle > /mnt/ramdisk/tests/tigerbeetle.log 2>&1 &
 
 # Verify
 pgrep tigerbeetle
@@ -168,20 +174,26 @@ cd /mnt/ramdisk/tests
 /home/lintaoz/database/redis/src/redis-server --dir /mnt/ramdisk/tests --daemonize yes
 
 # Run tests
-cd /home/lintaoz/work/lua_beetle/tests
+cd tests
 source ~/venv/bin/activate
-python3 test_functional.py
+python3 functional_tests.py
 
 # Expected output:
 # ✅ All tests passed!
 ```
 
-**Test Coverage:**
+**Test Coverage (17 tests):**
 - Account creation and lookup
 - Duplicate detection
+- Linked accounts with LINKED flag
+- Linked accounts rollback
 - Simple transfers
 - Multiple transfers
 - Two-phase transfers (pending/post/void)
+- Transfer lookup
+- Account transfers query (get_account_transfers.lua)
+- Account balances query (get_account_balances.lua)
+- Linked transfers rollback
 - Error handling
 
 ### Go Tests
@@ -192,13 +204,25 @@ cd /mnt/ramdisk/tests
 /home/lintaoz/database/redis/src/redis-server --dir /mnt/ramdisk/tests --daemonize yes
 
 # Run tests
-cd /home/lintaoz/work/lua_beetle/stress_test
-go test -v functional_test.go common.go
+cd tests
+go run functional_tests.go common.go
 
 # Expected output:
-# PASS
-# ok  	command-line-arguments	0.059s
+# ✅ All tests passed!
 ```
+
+**Test Coverage (11 tests):**
+- Account creation and lookup
+- Duplicate detection
+- Linked accounts with LINKED flag
+- Linked accounts rollback
+- Simple transfers
+- Two-phase transfers
+- Transfer lookup
+- Account transfers query
+- Account balances query
+- Linked transfers rollback
+- Multiple transfers
 
 ## Stress Tests
 
@@ -255,7 +279,7 @@ This models real scenarios like exchange wallets, popular merchants, etc.
 
 ```bash
 # Run full benchmark suite (192 tests, ~2 hours)
-cd /home/lintaoz/work/lua_beetle/stress_test
+cd tests
 ./run_benchmarks.sh
 
 # Monitor progress
@@ -447,7 +471,8 @@ Tests MUST:
 ## Reference Documentation
 
 - TigerBeetle docs: https://docs.tigerbeetle.com/
+- TigerBeetle Account: https://docs.tigerbeetle.com/reference/account/
+- TigerBeetle Transfer: https://docs.tigerbeetle.com/reference/transfer/
+- TigerBeetle AccountBalance: https://docs.tigerbeetle.com/reference/account-balance/
 - Two-phase transfers: https://docs.tigerbeetle.com/coding/two-phase-transfers/
 - Redis Lua scripting: https://redis.io/docs/manual/programmability/eval-intro/
-- Benchmark documentation: `stress_test/README_BENCHMARKS.md`
-- Test documentation: `tests/README.md`

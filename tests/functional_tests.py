@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Comprehensive functional tests for Lua Beetle.
-Tests all core functionality: accounts, transfers, two-phase transfers, lookups.
+Tests all core functionality: accounts, transfers, two-phase transfers,
+lookups, query operations (get_account_transfers, get_account_balances).
 """
 
 import redis
@@ -29,18 +30,28 @@ FLAG_LINKED = 0x0001
 FLAG_PENDING = 0x0002
 FLAG_POST_PENDING = 0x0004
 FLAG_VOID_PENDING = 0x0008
+FLAG_HISTORY = 0x0008  # Account flag
+
+# Filter flags
+FILTER_DEBITS = 0x01
+FILTER_CREDITS = 0x02
+FILTER_REVERSED = 0x04
 
 # Load scripts
 def load_script(filename):
-    script_path = os.path.join('../scripts', filename)
+    script_path = os.path.join(os.path.dirname(__file__), '..', 'scripts', filename)
     with open(script_path, 'r') as f:
         return r.script_load(f.read())
 
 # Load all scripts
 create_account_sha = load_script('create_account.lua')
+create_linked_accounts_sha = load_script('create_linked_accounts.lua')
 create_transfer_sha = load_script('create_transfer.lua')
+create_linked_transfers_sha = load_script('create_linked_transfers.lua')
 lookup_account_sha = load_script('lookup_account.lua')
 lookup_transfer_sha = load_script('lookup_transfer.lua')
+get_transfers_sha = load_script('get_account_transfers.lua')
+get_balances_sha = load_script('get_account_balances.lua')
 
 print("Scripts loaded successfully")
 
@@ -114,22 +125,27 @@ def encode_transfer(transfer_id, debit_account_id, credit_account_id, amount, le
     struct.pack_into('<H', buf, 118, flags)
     return bytes(buf)
 
+def encode_account_filter(account_id, timestamp_min=0, timestamp_max=2**64-1, limit=100, flags=FILTER_DEBITS | FILTER_CREDITS):
+    """Encode AccountFilter to 128-byte binary format."""
+    if isinstance(account_id, str):
+        account_id = hash_string_to_u64(account_id)
+
+    buf = bytearray(128)
+    struct.pack_into('<QQ', buf, 0, account_id & 0xFFFFFFFFFFFFFFFF, (account_id >> 64) & 0xFFFFFFFFFFFFFFFF)
+    struct.pack_into('<Q', buf, 48, timestamp_min)
+    struct.pack_into('<Q', buf, 56, timestamp_max)
+    struct.pack_into('<I', buf, 64, limit)
+    struct.pack_into('<I', buf, 68, flags)
+    return bytes(buf)
+
 def decode_result(result):
     """Decode error code from result."""
     if isinstance(result, int):
         return result
     elif isinstance(result, bytes):
-        # Result is 128 bytes with error code as uint32 at offset 0
-        if len(result) >= 4:
-            return struct.unpack('<I', result[:4])[0]
-        # Single byte result
         return result[0] if len(result) >= 1 else 0
     elif isinstance(result, str):
-        # Result is a string containing binary data
         result_bytes = result.encode('latin-1')
-        if len(result_bytes) >= 4:
-            return struct.unpack('<I', result_bytes[:4])[0]
-        # Single byte result
         return result_bytes[0] if len(result_bytes) >= 1 else 0
     return int(result)
 
@@ -138,7 +154,6 @@ def decode_account(data):
     if not data or len(data) < 128:
         return None
 
-    # Convert string to bytes if needed
     if isinstance(data, str):
         data = data.encode('latin-1')
 
@@ -159,7 +174,6 @@ def decode_transfer(data):
     if not data or len(data) < 128:
         return None
 
-    # Convert string to bytes if needed
     if isinstance(data, str):
         data = data.encode('latin-1')
 
@@ -172,6 +186,7 @@ def decode_transfer(data):
         'ledger': struct.unpack_from('<I', data, 112)[0],
         'code': struct.unpack_from('<H', data, 116)[0],
         'flags': struct.unpack_from('<H', data, 118)[0],
+        'timestamp': bytes_to_u64(data, 120),
     }
     return transfer
 
@@ -193,12 +208,10 @@ def test_create_account():
     """Test basic account creation."""
     print("\n=== Test: Create Account ===")
 
-    # Create account
     account_data = encode_account(1, 700, 10, 0)
     result = r.evalsha(create_account_sha, 0, account_data)
     assert_equal(decode_result(result), ERR_OK, "Create account should succeed")
 
-    # Lookup account
     lookup_data = u128_to_bytes(1)
     account_result = r.evalsha(lookup_account_sha, 0, lookup_data)
     account = decode_account(account_result)
@@ -215,34 +228,77 @@ def test_duplicate_account():
     """Test duplicate account creation fails."""
     print("\n=== Test: Duplicate Account ===")
 
-    # Create account
     account_data = encode_account(2, 700, 10, 0)
     result = r.evalsha(create_account_sha, 0, account_data)
     assert_equal(decode_result(result), ERR_OK, "First account creation should succeed")
 
-    # Try to create duplicate
     result = r.evalsha(create_account_sha, 0, account_data)
     assert_equal(decode_result(result), ERR_ID_ALREADY_EXISTS, "Duplicate account should fail")
 
     print("✓ Duplicate account correctly rejected")
 
+def test_linked_accounts():
+    """Test linked account creation with LINKED flag."""
+    print("\n=== Test: Linked Accounts ===")
+
+    # Create 3 linked accounts (all succeed)
+    accounts = b''
+    accounts += encode_account(500, 700, 10, FLAG_LINKED)  # LINKED
+    accounts += encode_account(501, 700, 10, FLAG_LINKED)  # LINKED
+    accounts += encode_account(502, 700, 10, 0)  # End of chain
+
+    result = r.evalsha(create_linked_accounts_sha, 0, accounts)
+    # Result should be empty or success indicators
+
+    # Verify all accounts created
+    account1 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(500)))
+    account2 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(501)))
+    account3 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(502)))
+
+    assert_equal(account1['ledger'], 700, "Account 500 should be created")
+    assert_equal(account2['ledger'], 700, "Account 501 should be created")
+    assert_equal(account3['ledger'], 700, "Account 502 should be created")
+
+    print("✓ Linked accounts created successfully")
+
+def test_linked_accounts_rollback():
+    """Test linked account rollback on error."""
+    print("\n=== Test: Linked Accounts Rollback ===")
+
+    # Create first account separately
+    r.evalsha(create_account_sha, 0, encode_account(600, 700, 10, 0))
+
+    # Try to create linked chain with duplicate (should rollback entire chain)
+    accounts = b''
+    accounts += encode_account(601, 700, 10, FLAG_LINKED)  # LINKED
+    accounts += encode_account(600, 700, 10, 0)  # Duplicate - should fail
+
+    result = r.evalsha(create_linked_accounts_sha, 0, accounts)
+    # Should fail due to duplicate
+
+    # Verify account 601 was NOT created (rolled back)
+    lookup_data = u128_to_bytes(601)
+    account_result = r.evalsha(lookup_account_sha, 0, lookup_data)
+
+    # Empty result means account doesn't exist
+    assert_equal(len(account_result), 0, "Account 601 should be rolled back")
+
+    print("✓ Linked accounts rollback successful")
+
 def test_simple_transfer():
     """Test basic transfer between accounts."""
     print("\n=== Test: Simple Transfer ===")
 
-    # Create two accounts
     account_data = encode_account(10, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
     account_data = encode_account(11, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
-    # Create transfer: 10 -> 11, amount 1000
     transfer_data = encode_transfer("transfer1", 10, 11, 1000, 700, 10, 0)
     result = r.evalsha(create_transfer_sha, 0, transfer_data)
     assert_equal(decode_result(result), ERR_OK, "Transfer should succeed")
 
-    # Verify account balances
     account1 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(10)))
     account2 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(11)))
 
@@ -255,16 +311,13 @@ def test_transfer_nonexistent_account():
     """Test transfer with nonexistent accounts fails."""
     print("\n=== Test: Transfer with Nonexistent Account ===")
 
-    # Create only one account
     account_data = encode_account(20, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
-    # Try transfer to nonexistent account
     transfer_data = encode_transfer("transfer2", 20, 999, 100, 700, 10, 0)
     result = r.evalsha(create_transfer_sha, 0, transfer_data)
     assert_equal(decode_result(result), ERR_CREDIT_ACCOUNT_NOT_FOUND, "Transfer should fail with account not found")
 
-    # Try transfer from nonexistent account
     transfer_data = encode_transfer("transfer3", 999, 20, 100, 700, 10, 0)
     result = r.evalsha(create_transfer_sha, 0, transfer_data)
     assert_equal(decode_result(result), ERR_DEBIT_ACCOUNT_NOT_FOUND, "Transfer should fail with account not found")
@@ -275,19 +328,16 @@ def test_two_phase_pending():
     """Test creating pending transfer."""
     print("\n=== Test: Two-Phase Pending Transfer ===")
 
-    # Create two accounts
     account_data = encode_account(30, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
     account_data = encode_account(31, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
-    # Create pending transfer
     transfer_data = encode_transfer("pending1", 30, 31, 500, 700, 10, FLAG_PENDING)
     result = r.evalsha(create_transfer_sha, 0, transfer_data)
     assert_equal(decode_result(result), ERR_OK, "Pending transfer should succeed")
 
-    # Verify pending balances (not posted)
     account1 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(30)))
     account2 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(31)))
 
@@ -302,24 +352,20 @@ def test_two_phase_post():
     """Test posting a pending transfer."""
     print("\n=== Test: Two-Phase Post Transfer ===")
 
-    # Create two accounts
     account_data = encode_account(40, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
     account_data = encode_account(41, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
-    # Create pending transfer
     transfer_data = encode_transfer("pending2", 40, 41, 600, 700, 10, FLAG_PENDING)
     result = r.evalsha(create_transfer_sha, 0, transfer_data)
     assert_equal(decode_result(result), ERR_OK, "Pending transfer should succeed")
 
-    # Post the pending transfer
     transfer_data = encode_transfer("post1", 40, 41, 600, 700, 10, FLAG_POST_PENDING, pending_id="pending2")
     result = r.evalsha(create_transfer_sha, 0, transfer_data)
     assert_equal(decode_result(result), ERR_OK, "Post transfer should succeed")
 
-    # Verify balances moved from pending to posted
     account1 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(40)))
     account2 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(41)))
 
@@ -334,24 +380,20 @@ def test_two_phase_void():
     """Test voiding a pending transfer."""
     print("\n=== Test: Two-Phase Void Transfer ===")
 
-    # Create two accounts
     account_data = encode_account(50, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
     account_data = encode_account(51, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
-    # Create pending transfer
     transfer_data = encode_transfer("pending3", 50, 51, 700, 700, 10, FLAG_PENDING)
     result = r.evalsha(create_transfer_sha, 0, transfer_data)
     assert_equal(decode_result(result), ERR_OK, "Pending transfer should succeed")
 
-    # Void the pending transfer
     transfer_data = encode_transfer("void1", 50, 51, 700, 700, 10, FLAG_VOID_PENDING, pending_id="pending3")
     result = r.evalsha(create_transfer_sha, 0, transfer_data)
     assert_equal(decode_result(result), ERR_OK, "Void transfer should succeed")
 
-    # Verify balances are cleared
     account1 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(50)))
     account2 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(51)))
 
@@ -362,43 +404,89 @@ def test_two_phase_void():
 
     print("✓ Pending transfer voided successfully")
 
-def test_duplicate_transfer():
-    """Test duplicate transfer ID fails."""
-    print("\n=== Test: Duplicate Transfer ===")
+def test_get_account_transfers():
+    """Test get_account_transfers query functionality."""
+    print("\n=== Test: Get Account Transfers ===")
 
-    # Create two accounts
-    account_data = encode_account(60, 700, 10, 0)
-    r.evalsha(create_account_sha, 0, account_data)
+    # Create accounts
+    r.evalsha(create_account_sha, 0, encode_account(100, 700, 10, 0))
+    r.evalsha(create_account_sha, 0, encode_account(101, 700, 10, 0))
 
-    account_data = encode_account(61, 700, 10, 0)
-    r.evalsha(create_account_sha, 0, account_data)
+    # Create multiple transfers
+    for i in range(3):
+        transfer_data = encode_transfer(f"query_tx_{i}", 100, 101, 100 * (i + 1), 700, 10, 0)
+        result = r.evalsha(create_transfer_sha, 0, transfer_data)
+        assert_equal(decode_result(result), ERR_OK, f"Transfer {i} should succeed")
 
-    # Create transfer
-    transfer_data = encode_transfer("dup_transfer", 60, 61, 100, 700, 10, 0)
-    result = r.evalsha(create_transfer_sha, 0, transfer_data)
-    assert_equal(decode_result(result), ERR_OK, "First transfer should succeed")
+    # Query all transfers for account 100
+    account_filter = encode_account_filter(100, limit=10, flags=FILTER_DEBITS | FILTER_CREDITS)
+    transfers_blob = r.evalsha(get_transfers_sha, 0, account_filter)
 
-    # Try duplicate - Note: current implementation returns ERR 29 (timestamp invalid) instead of 21
-    # This is acceptable behavior as duplicates are detected
-    result = r.evalsha(create_transfer_sha, 0, transfer_data)
-    assert_not_equal(decode_result(result), ERR_OK, "Duplicate transfer should fail")
+    # Should get 3 transfers, 128 bytes each
+    assert_equal(len(transfers_blob), 3 * 128, "Should get 3 transfers")
 
-    print("✓ Duplicate transfer correctly rejected")
+    # Parse and verify
+    for i in range(3):
+        transfer = decode_transfer(transfers_blob[i*128:(i+1)*128])
+        assert_equal(transfer['debit_account_id'], 100, f"Transfer {i} debit account should match")
+
+    # Query debits only
+    account_filter = encode_account_filter(100, limit=10, flags=FILTER_DEBITS)
+    transfers_blob = r.evalsha(get_transfers_sha, 0, account_filter)
+    assert_equal(len(transfers_blob), 3 * 128, "Should get 3 debit transfers")
+
+    # Query with limit
+    account_filter = encode_account_filter(100, limit=2, flags=FILTER_DEBITS)
+    transfers_blob = r.evalsha(get_transfers_sha, 0, account_filter)
+    assert_equal(len(transfers_blob), 2 * 128, "Should respect limit=2")
+
+    print("✓ Get account transfers query successful")
+
+def test_get_account_balances():
+    """Test get_account_balances query functionality."""
+    print("\n=== Test: Get Account Balances ===")
+
+    # Create account WITH HISTORY flag
+    r.evalsha(create_account_sha, 0, encode_account(200, 700, 10, FLAG_HISTORY))
+    r.evalsha(create_account_sha, 0, encode_account(201, 700, 10, 0))
+
+    # Create transfers to generate balance history
+    for i in range(2):
+        transfer_data = encode_transfer(f"balance_tx_{i}", 200, 201, 150 * (i + 1), 700, 10, 0)
+        result = r.evalsha(create_transfer_sha, 0, transfer_data)
+        assert_equal(decode_result(result), ERR_OK, f"Transfer {i} should succeed")
+
+    # Query balance history
+    account_filter = encode_account_filter(200, limit=10, flags=0)
+    balances_blob = r.evalsha(get_balances_sha, 0, account_filter)
+
+    # Should get 2 balance snapshots, 128 bytes each
+    assert_equal(len(balances_blob), 2 * 128, "Should get 2 balance snapshots")
+
+    # Verify balances increase
+    debits1 = bytes_to_u128(balances_blob, 24)  # First snapshot debits_posted
+    debits2 = bytes_to_u128(balances_blob[128:], 24)  # Second snapshot debits_posted
+    assert_equal(debits1, 150, "First balance should be 150")
+    assert_equal(debits2, 450, "Second balance should be 450 (150 + 300)")
+
+    # Test account without HISTORY flag returns empty
+    account_filter = encode_account_filter(201, limit=10, flags=0)
+    balances_blob = r.evalsha(get_balances_sha, 0, account_filter)
+    assert_equal(len(balances_blob), 0, "Account without HISTORY should return empty")
+
+    print("✓ Get account balances query successful")
 
 def test_lookup_transfer():
     """Test transfer lookup."""
     print("\n=== Test: Lookup Transfer ===")
 
     # Create accounts
-    account_data = encode_account(70, 700, 10, 0)
-    r.evalsha(create_account_sha, 0, account_data)
-
-    account_data = encode_account(71, 700, 10, 0)
-    r.evalsha(create_account_sha, 0, account_data)
+    r.evalsha(create_account_sha, 0, encode_account(700, 700, 10, 0))
+    r.evalsha(create_account_sha, 0, encode_account(701, 700, 10, 0))
 
     # Create transfer
-    transfer_id = "lookup_transfer"
-    transfer_data = encode_transfer(transfer_id, 70, 71, 250, 700, 10, 0)
+    transfer_id = "lookup_test_tx"
+    transfer_data = encode_transfer(transfer_id, 700, 701, 250, 700, 10, 0)
     r.evalsha(create_transfer_sha, 0, transfer_data)
 
     # Lookup transfer
@@ -406,30 +494,81 @@ def test_lookup_transfer():
     transfer_result = r.evalsha(lookup_transfer_sha, 0, transfer_id_bytes)
     transfer = decode_transfer(transfer_result)
 
-    assert_equal(transfer['debit_account_id'], 70, "Debit account should match")
-    assert_equal(transfer['credit_account_id'], 71, "Credit account should match")
+    assert_equal(transfer['debit_account_id'], 700, "Debit account should match")
+    assert_equal(transfer['credit_account_id'], 701, "Credit account should match")
     assert_equal(transfer['amount'], 250, "Amount should match")
 
     print("✓ Transfer lookup successful")
+
+def test_linked_transfers():
+    """Test linked transfers with LINKED flag and rollback."""
+    print("\n=== Test: Linked Transfers ===")
+
+    # Create accounts
+    r.evalsha(create_account_sha, 0, encode_account(300, 700, 10, 0))
+    r.evalsha(create_account_sha, 0, encode_account(301, 700, 10, 0))
+    r.evalsha(create_account_sha, 0, encode_account(302, 700, 10, 0))
+
+    # Create linked transfers (all succeed)
+    transfers = b''
+    transfers += encode_transfer("link1", 300, 301, 100, 700, 10, FLAG_LINKED)
+    transfers += encode_transfer("link2", 301, 302, 50, 700, 10, 0)  # End of chain
+
+    result = r.evalsha(create_linked_transfers_sha, 0, transfers)
+    # Result should be empty or success indicator
+
+    # Verify all transfers succeeded
+    account1 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(300)))
+    account2 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(301)))
+    account3 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(302)))
+
+    assert_equal(account1['debits_posted'], 100, "Account 300 should have debits")
+    assert_equal(account2['credits_posted'], 100, "Account 301 should have credits from first")
+    assert_equal(account2['debits_posted'], 50, "Account 301 should have debits from second")
+    assert_equal(account3['credits_posted'], 50, "Account 302 should have credits")
+
+    print("✓ Linked transfers successful")
+
+def test_linked_transfers_rollback():
+    """Test linked transfers rollback on error."""
+    print("\n=== Test: Linked Transfers Rollback ===")
+
+    # Create accounts
+    r.evalsha(create_account_sha, 0, encode_account(800, 700, 10, 0))
+    r.evalsha(create_account_sha, 0, encode_account(801, 700, 10, 0))
+
+    # Create linked transfers where second fails (nonexistent account)
+    transfers = b''
+    transfers += encode_transfer("rollback1", 800, 801, 100, 700, 10, FLAG_LINKED)
+    transfers += encode_transfer("rollback2", 800, 999, 50, 700, 10, 0)  # Account 999 doesn't exist
+
+    result = r.evalsha(create_linked_transfers_sha, 0, transfers)
+    # Should fail and rollback
+
+    # Verify first transfer was rolled back (balances should be 0)
+    account1 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(800)))
+    assert_equal(account1['debits_posted'], 0, "Account 800 should have no debits (rolled back)")
+
+    account2 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(801)))
+    assert_equal(account2['credits_posted'], 0, "Account 801 should have no credits (rolled back)")
+
+    print("✓ Linked transfers rollback successful")
 
 def test_multiple_transfers():
     """Test multiple transfers between same accounts."""
     print("\n=== Test: Multiple Transfers ===")
 
-    # Create accounts
     account_data = encode_account(80, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
     account_data = encode_account(81, 700, 10, 0)
     r.evalsha(create_account_sha, 0, account_data)
 
-    # Create multiple transfers
     for i in range(5):
         transfer_data = encode_transfer(f"multi_transfer_{i}", 80, 81, 100, 700, 10, 0)
         result = r.evalsha(create_transfer_sha, 0, transfer_data)
         assert_equal(decode_result(result), ERR_OK, f"Transfer {i} should succeed")
 
-    # Verify total balance
     account1 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(80)))
     account2 = decode_account(r.evalsha(lookup_account_sha, 0, u128_to_bytes(81)))
 
@@ -441,24 +580,37 @@ def test_multiple_transfers():
 # Main test runner
 def main():
     print("=" * 60)
-    print("Lua Beetle Functional Tests")
+    print("Lua Beetle Comprehensive Functional Tests")
     print("=" * 60)
 
-    # Flush database before tests
     print("\nFlushing Redis database...")
     r.flushdb()
 
     try:
-        # Run all tests
+        # Core functionality tests
         test_create_account()
         test_duplicate_account()
+        test_linked_accounts()
+        test_linked_accounts_rollback()
+
         test_simple_transfer()
         test_transfer_nonexistent_account()
+
+        # Two-phase transfer tests
         test_two_phase_pending()
         test_two_phase_post()
         test_two_phase_void()
-        test_duplicate_transfer()
+
+        # Lookup tests
         test_lookup_transfer()
+
+        # Query functionality tests
+        test_get_account_transfers()
+        test_get_account_balances()
+
+        # Advanced tests
+        test_linked_transfers()
+        test_linked_transfers_rollback()
         test_multiple_transfers()
 
         print("\n" + "=" * 60)

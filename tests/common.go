@@ -8,6 +8,49 @@ import (
 	"time"
 )
 
+// ============================================================================
+// Error codes matching TigerBeetle
+// ============================================================================
+
+const (
+	ErrOK                           = 0
+	ErrIDAlreadyExists              = 21
+	ErrDebitAccountNotFound         = 38
+	ErrCreditAccountNotFound        = 39
+	ErrAccountsMustBeDifferent      = 40
+	ErrPendingTransferNotFound      = 34
+	ErrPendingTransferAlreadyPosted = 35
+	ErrPendingTransferAlreadyVoided = 36
+	ErrExceedsCredits               = 42
+	ErrExceedsDebits                = 43
+)
+
+// ============================================================================
+// Flags
+// ============================================================================
+
+const (
+	FlagLinked      = 0x0001
+	FlagPending     = 0x0002
+	FlagPostPending = 0x0004
+	FlagVoidPending = 0x0008
+	FlagHistory     = 0x0008 // Account flag
+)
+
+// ============================================================================
+// Filter flags
+// ============================================================================
+
+const (
+	FilterDebits   = 0x01
+	FilterCredits  = 0x02
+	FilterReversed = 0x04
+)
+
+// ============================================================================
+// Workload Types
+// ============================================================================
+
 // WorkloadType defines the type of workload to run
 type WorkloadType string
 
@@ -210,7 +253,7 @@ func (e *BinaryEncoder) EncodeTransfer(id string, debitAccountID, creditAccountI
 
 	// Parse ID string to uint64 (simplified - in production would handle the full ID format)
 	// For now, use a hash or simplified conversion
-	transferID := hashStringToU64(id)
+	transferID := HashString(id)
 
 	// id: 16 bytes (offset 0)
 	copy(buf[0:16], encodeU128(transferID))
@@ -250,8 +293,8 @@ func (e *BinaryEncoder) EncodeTransferWithPending(id string, debitAccountID, cre
 	buf := make([]byte, 128)
 
 	// Parse ID strings to uint64
-	transferID := hashStringToU64(id)
-	pendingIDU64 := hashStringToU64(pendingID)
+	transferID := HashString(id)
+	pendingIDU64 := HashString(pendingID)
 
 	// id: 16 bytes (offset 0)
 	copy(buf[0:16], encodeU128(transferID))
@@ -317,8 +360,8 @@ func (e *BinaryEncoder) DecodeTransferResult(data interface{}) (uint8, error) {
 	}
 }
 
-// Simple hash function to convert string ID to uint64
-func hashStringToU64(s string) uint64 {
+// HashString is a simple hash function to convert string ID to uint64
+func HashString(s string) uint64 {
 	hash := uint64(0)
 	for _, c := range s {
 		hash = hash*31 + uint64(c)
@@ -337,4 +380,60 @@ func ID16ToU64(id []byte) uint64 {
 		return 0
 	}
 	return binary.LittleEndian.Uint64(id[0:8])
+}
+
+// ============================================================================
+// Additional encoding methods for test_functional.go
+// ============================================================================
+
+// EncodeAccountFilter encodes AccountFilter to 128-byte binary format
+func (e *BinaryEncoder) EncodeAccountFilter(accountID uint64, timestampMin, timestampMax uint64, limit uint32, flags uint32) []byte {
+	buf := make([]byte, 128)
+
+	copy(buf[0:16], encodeU128(accountID))
+	binary.LittleEndian.PutUint64(buf[48:56], timestampMin)
+	binary.LittleEndian.PutUint64(buf[56:64], timestampMax)
+	binary.LittleEndian.PutUint32(buf[64:68], limit)
+	binary.LittleEndian.PutUint32(buf[68:72], flags)
+
+	return buf
+}
+
+// DecodeAccount decodes account from 128-byte binary format
+func DecodeAccount(data string) map[string]uint64 {
+	if len(data) < 128 {
+		return nil
+	}
+
+	buf := []byte(data)
+	return map[string]uint64{
+		"id":              binary.LittleEndian.Uint64(buf[0:8]),
+		"debits_pending":  binary.LittleEndian.Uint64(buf[16:24]),
+		"debits_posted":   binary.LittleEndian.Uint64(buf[32:40]),
+		"credits_pending": binary.LittleEndian.Uint64(buf[48:56]),
+		"credits_posted":  binary.LittleEndian.Uint64(buf[64:72]),
+		"ledger":          uint64(binary.LittleEndian.Uint32(buf[112:116])),
+		"code":            uint64(binary.LittleEndian.Uint16(buf[116:118])),
+		"flags":           uint64(binary.LittleEndian.Uint16(buf[118:120])),
+	}
+}
+
+// DecodeTransfer decodes transfer from 128-byte binary format
+func DecodeTransfer(data string) map[string]uint64 {
+	if len(data) < 128 {
+		return nil
+	}
+
+	buf := []byte(data)
+	return map[string]uint64{
+		"id":                binary.LittleEndian.Uint64(buf[0:8]),
+		"debit_account_id":  binary.LittleEndian.Uint64(buf[16:24]),
+		"credit_account_id": binary.LittleEndian.Uint64(buf[32:40]),
+		"amount":            binary.LittleEndian.Uint64(buf[48:56]),
+		"pending_id":        binary.LittleEndian.Uint64(buf[64:72]),
+		"ledger":            uint64(binary.LittleEndian.Uint32(buf[112:116])),
+		"code":              uint64(binary.LittleEndian.Uint16(buf[116:118])),
+		"flags":             uint64(binary.LittleEndian.Uint16(buf[118:120])),
+		"timestamp":         binary.LittleEndian.Uint64(buf[120:128]),
+	}
 }

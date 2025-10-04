@@ -1,6 +1,6 @@
 -- Get Account Balances Script (Binary Encoding)
 -- Matches TigerBeetle's get_account_balances with AccountFilter
--- Returns concatenated 64-byte binary AccountBalance data
+-- Returns concatenated 128-byte binary AccountBalance data
 -- KEYS: none
 -- ARGV[1]: AccountFilter (128 bytes binary)
 --
@@ -17,12 +17,13 @@
 --   [68:72]   flags (uint32): debits=0x01, credits=0x02, reversed=0x04
 --   [72:128]  reserved (56 bytes, must be 0)
 --
--- AccountBalance layout (64 bytes):
+-- AccountBalance layout (128 bytes):
 --   [0:8]     timestamp (uint64)
 --   [8:24]    debits_pending (uint128)
 --   [24:40]   debits_posted (uint128)
 --   [40:56]   credits_pending (uint128)
---   [56:64]   credits_posted (uint128)
+--   [56:72]   credits_posted (uint128)
+--   [72:128]  reserved (56 bytes, must be 0)
 
 local filter_data = ARGV[1]
 
@@ -101,7 +102,7 @@ if not has_history then
     return "" -- Account doesn't have history flag set
 end
 
--- Get balance history index (string of concatenated 64-byte balance snapshots)
+-- Get balance history index (string of concatenated 128-byte balance snapshots)
 -- Use binary account_id for key (same as create_transfer.lua)
 local index_key = "account:" .. account_id .. ":balance_history"
 local balance_blob = redis.call('GET', index_key)
@@ -110,13 +111,13 @@ if not balance_blob or #balance_blob == 0 then
     return "" -- No balance history found
 end
 
--- Each balance snapshot is 64 bytes
-local num_balances = #balance_blob / 64
+-- Each balance snapshot is 128 bytes
+local num_balances = #balance_blob / 128
 
 -- Filter and collect balances
 local candidates = {}
 for i = 0, num_balances - 1 do
-    local balance_data = string.sub(balance_blob, i * 64 + 1, i * 64 + 64)
+    local balance_data = string.sub(balance_blob, i * 128 + 1, i * 128 + 128)
     local timestamp = decode_u64(balance_data, 1)
 
     -- Apply timestamp filter

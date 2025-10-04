@@ -96,19 +96,19 @@ func main() {
 	// Run tests based on mode
 	switch strings.ToLower(*mode) {
 	case "redis":
-		if err := runRedisTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
+		if err := runLuaBeetleTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "Redis test failed: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "dragonfly":
-		if err := runRedisTest(ctx, config, "localhost:6380", "DragonflyDB", *noCleanup); err != nil {
+		if err := runLuaBeetleTest(ctx, config, "localhost:6380", "DragonflyDB", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "DragonflyDB test failed: %v\n", err)
 			os.Exit(1)
 		}
 
 	case "eloqkv":
-		if err := runRedisTest(ctx, config, "localhost:6379", "EloqKV", *noCleanup); err != nil {
+		if err := runLuaBeetleTest(ctx, config, "localhost:6379", "EloqKV", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "EloqKV test failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -123,7 +123,7 @@ func main() {
 		fmt.Println("Running both Redis and TigerBeetle tests for comparison...")
 
 		// Run Redis first
-		if err := runRedisTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
+		if err := runLuaBeetleTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "Redis test failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -140,7 +140,7 @@ func main() {
 		fmt.Println("Running Redis, DragonflyDB, and TigerBeetle tests for comparison...")
 
 		// Run Redis
-		if err := runRedisTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
+		if err := runLuaBeetleTest(ctx, config, "localhost:6379", "Redis", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "Redis test failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -148,7 +148,7 @@ func main() {
 		fmt.Println("\n" + strings.Repeat("=", 60) + "\n")
 
 		// Run DragonflyDB
-		if err := runRedisTest(ctx, config, "localhost:6380", "DragonflyDB", *noCleanup); err != nil {
+		if err := runLuaBeetleTest(ctx, config, "localhost:6380", "DragonflyDB", *noCleanup); err != nil {
 			fmt.Fprintf(os.Stderr, "DragonflyDB test failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -169,8 +169,8 @@ func main() {
 	fmt.Println("\n✅ Stress test completed successfully!")
 }
 
-func runRedisTest(ctx context.Context, config *StressTestConfig, addr string, name string, noCleanup bool) error {
-	test, err := NewRedisStressTest(config, addr, name)
+func runLuaBeetleTest(ctx context.Context, config *StressTestConfig, addr string, name string, noCleanup bool) error {
+	test, err := NewLuaBeetleStressTest(config, addr, name)
 	if err != nil {
 		return err
 	}

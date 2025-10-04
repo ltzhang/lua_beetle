@@ -154,7 +154,7 @@ func (t *TigerBeetleStressTest) performTransferBatch(ctx context.Context, worker
 		debitAccountID, creditAccountID := accountGen.NextHotAndAny()
 
 		transfers[i] = types.Transfer{
-			ID:              types.ToUint128(hashStringToU64(GenerateTransferID(workerID, *counter))),
+			ID:              types.ToUint128(HashString(GenerateTransferID(workerID, *counter))),
 			DebitAccountID:  types.ToUint128(debitAccountID),
 			CreditAccountID: types.ToUint128(creditAccountID),
 			Amount:          types.ToUint128(100),
@@ -234,7 +234,7 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 		if action < 0.5 {
 			// Create pending transfer
 			debitAccountID, creditAccountID := accountGen.NextHotAndAny()
-			transferID := types.ToUint128(hashStringToU64(GenerateTransferID(workerID, *counter)))
+			transferID := types.ToUint128(HashString(GenerateTransferID(workerID, *counter)))
 			amount := uint64(100)
 
 			pendingToCreate = append(pendingToCreate, types.Transfer{
@@ -259,7 +259,7 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 			// Try to post or void an existing pending transfer
 			// Create a pending first, then post/void it in separate batches
 			debitAccountID, creditAccountID := accountGen.NextHotAndAny()
-			pendingID := types.ToUint128(hashStringToU64(GenerateTransferID(workerID, *counter)))
+			pendingID := types.ToUint128(HashString(GenerateTransferID(workerID, *counter)))
 			amount := uint64(100)
 
 			// Create pending first
@@ -275,7 +275,7 @@ func (t *TigerBeetleStressTest) performTwoPhaseBatch(ctx context.Context, worker
 
 			// Post or void (will be executed after pending is committed)
 			*counter++
-			postVoidID := types.ToUint128(hashStringToU64(GenerateTransferID(workerID, *counter)))
+			postVoidID := types.ToUint128(HashString(GenerateTransferID(workerID, *counter)))
 			var flags types.TransferFlags
 			if action < 0.75 {
 				flags = types.TransferFlags{PostPendingTransfer: true}

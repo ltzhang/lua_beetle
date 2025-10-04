@@ -20,20 +20,23 @@ A Redis Lua implementation of TigerBeetle's core financial transaction APIs. Lua
 lua_beetle/
 ├── scripts/
 │   ├── create_account.lua           # Create 1 account (binary 128-byte)
+│   ├── create_linked_accounts.lua   # Create linked accounts with rollback
 │   ├── create_transfer.lua          # Create 1 transfer (binary 128-byte)
-│   ├── create_chained_transfers.lua # Create linked transfers with rollback
+│   ├── create_linked_transfers.lua  # Create linked transfers with rollback
 │   ├── lookup_account.lua           # Lookup 1 account by ID
 │   ├── lookup_transfer.lua          # Lookup 1 transfer by ID
-│   ├── get_account_transfers.lua    # Query transfers with AccountFilter (128-byte)
-│   └── get_account_balances.lua     # Query balance history (64-byte snapshots)
-├── stress_test/
-│   ├── stress_test.go               # Go-based stress test suite
-│   ├── functional_test.go           # Functional tests
-│   ├── run_benchmarks.sh            # Comprehensive benchmark suite
-│   └── analyze_results.py           # Results analysis
+│   ├── get_account_transfers.lua    # Query transfers with AccountFilter
+│   └── get_account_balances.lua     # Query balance history with AccountFilter
 ├── tests/
-│   ├── test_functional.py           # Python functional tests
-│   └── test_query_functions.py      # Tests for query operations
+│   ├── functional_tests.py          # Comprehensive Python functional tests
+│   ├── functional_tests.go          # Comprehensive Go functional tests
+│   ├── main.go                      # Stress test entry point
+│   ├── common.go                    # Binary encoder and shared utilities
+│   ├── luabeetle_stress.go          # Lua Beetle stress test implementation
+│   ├── tigerbeetle_stress.go        # TigerBeetle stress test
+│   ├── run_benchmarks.sh            # Comprehensive benchmark suite
+│   ├── analyze_results.py           # Results analysis
+│   └── go.mod                       # Go module
 └── README.md
 ```
 
@@ -53,13 +56,13 @@ cd /mnt/ramdisk/tests
 redis-server --dir /mnt/ramdisk/tests --daemonize yes
 
 # 2. Run functional tests
-cd /home/lintaoz/work/lua_beetle/tests
-python3 test_functional.py
-python3 test_query_functions.py
+cd tests
+python3 functional_tests.py
+go run functional_tests.go common.go
 
 # 3. Run stress tests
-cd /home/lintaoz/work/lua_beetle/stress_test
-go build
+cd tests
+go build -o stress_test main.go common.go luabeetle_stress.go tigerbeetle_stress.go
 ./stress_test -mode=redis -workload=transfer -accounts=10000 -workers=4 -duration=30
 ```
 
@@ -129,132 +132,28 @@ go build
 - `0x02` - CREDITS (include credit transfers)
 - `0x04` - REVERSED (reverse sort order)
 
-### AccountBalance (64 bytes)
+### AccountBalance (128 bytes)
 ```
 [0:8]     timestamp (uint64)
 [8:24]    debits_pending (uint128)
 [24:40]   debits_posted (uint128)
 [40:56]   credits_pending (uint128)
-[56:64]   credits_posted (uint128)
+[56:72]   credits_posted (uint128)
+[72:128]  reserved (56 bytes, must be 0)
 ```
 
 ## API Usage
 
-### Basic Operations
+See comprehensive usage examples in:
+- **Python**: `tests/functional_tests.py` - Complete implementation with binary encoding helpers
+- **Go**: `tests/functional_tests.go` - Full Go implementation with BinaryEncoder
 
-```python
-import redis
-from encoder import BinaryEncoder
-
-client = redis.Redis(decode_responses=False)
-encoder = BinaryEncoder()
-
-# Load scripts
-with open('scripts/create_account.lua', 'r') as f:
-    create_account_sha = client.script_load(f.read())
-
-with open('scripts/create_transfer.lua', 'r') as f:
-    create_transfer_sha = client.script_load(f.read())
-
-# Create account (binary 128 bytes)
-account_data = encoder.encode_account(
-    account_id=1,
-    ledger=700,
-    code=10,
-    flags=0x0008  # HISTORY flag
-)
-result = client.evalsha(create_account_sha, 0, account_data)
-
-# Create transfer (binary 128 bytes)
-transfer_data = encoder.encode_transfer(
-    transfer_id="tx_1",
-    debit_account_id=1,
-    credit_account_id=2,
-    amount=500,
-    ledger=700,
-    code=10,
-    flags=0
-)
-result = client.evalsha(create_transfer_sha, 0, transfer_data)
-```
-
-### Two-Phase Transfers
-
-```python
-# 1. Create pending transfer
-pending_data = encoder.encode_transfer(
-    transfer_id="pending_1",
-    debit_account_id=1,
-    credit_account_id=2,
-    amount=500,
-    ledger=700,
-    code=10,
-    flags=0x0002  # PENDING
-)
-client.evalsha(create_transfer_sha, 0, pending_data)
-
-# 2. Post pending transfer
-post_data = encoder.encode_transfer_with_pending(
-    transfer_id="post_1",
-    debit_account_id=1,
-    credit_account_id=2,
-    amount=500,
-    pending_id="pending_1",
-    ledger=700,
-    code=10,
-    flags=0x0004  # POST_PENDING_TRANSFER
-)
-client.evalsha(create_transfer_sha, 0, post_data)
-
-# OR: Void pending transfer
-void_data = encoder.encode_transfer_with_pending(
-    transfer_id="void_1",
-    debit_account_id=1,
-    credit_account_id=2,
-    amount=500,
-    pending_id="pending_1",
-    ledger=700,
-    code=10,
-    flags=0x0008  # VOID_PENDING_TRANSFER
-)
-client.evalsha(create_transfer_sha, 0, void_data)
-```
-
-### Query Operations
-
-```python
-# Load query scripts
-with open('scripts/get_account_transfers.lua', 'r') as f:
-    get_transfers_sha = client.script_load(f.read())
-
-with open('scripts/get_account_balances.lua', 'r') as f:
-    get_balances_sha = client.script_load(f.read())
-
-# Get account transfers with filter
-account_filter = encoder.encode_account_filter(
-    account_id=1,
-    timestamp_min=0,
-    timestamp_max=2**64 - 1,
-    limit=10,
-    flags=0x03  # DEBITS | CREDITS
-)
-transfers_blob = client.evalsha(get_transfers_sha, 0, account_filter)
-
-# Parse results (each transfer is 128 bytes)
-num_transfers = len(transfers_blob) // 128
-for i in range(num_transfers):
-    transfer = encoder.decode_transfer(transfers_blob[i*128:(i+1)*128])
-    print(transfer)
-
-# Get account balance history
-balances_blob = client.evalsha(get_balances_sha, 0, account_filter)
-
-# Parse results (each balance is 64 bytes)
-num_balances = len(balances_blob) // 64
-for i in range(num_balances):
-    balance = encoder.decode_account_balance(balances_blob[i*64:(i+1)*64])
-    print(balance)
-```
+Both demonstrate:
+- Account creation and lookup
+- Single-phase and two-phase transfers
+- Query operations (get_account_transfers, get_account_balances)
+- AccountFilter usage (128-byte binary)
+- Error handling and sanity checks
 
 ### Error Codes
 
@@ -413,44 +312,60 @@ account = {
 
 ## Testing
 
-### Functional Tests (Python)
+### Comprehensive Functional Tests
 
-**test_functional.py** - Core functionality:
-- ✅ Account creation and validation
-- ✅ Single-phase transfers
-- ✅ Two-phase transfers (pending/post/void)
-- ✅ Linked operations and rollback
-- ✅ Balance constraints
-- ✅ Error handling
+**Python: `tests/functional_tests.py`** - Complete test coverage (17 tests):
+- ✅ Account creation and validation (create_account.lua)
+- ✅ Duplicate account detection
+- ✅ Linked accounts with LINKED flag (create_linked_accounts.lua)
+- ✅ Linked accounts rollback on error
+- ✅ Single-phase transfers (create_transfer.lua)
+- ✅ Nonexistent account error handling
+- ✅ Two-phase transfers: pending/post/void
+- ✅ Transfer lookup (lookup_transfer.lua)
+- ✅ Account transfers query (get_account_transfers.lua)
+- ✅ Account balances query (get_account_balances.lua)
+- ✅ Linked transfers with LINKED flag (create_linked_transfers.lua)
+- ✅ Linked transfers rollback on error
+- ✅ Multiple transfers
+- ✅ All 8 Lua scripts tested
+- ✅ Full sanity checks on all operations
+- ✅ Crash on any error (per CLAUDE.md)
 
-**test_query_functions.py** - Query operations:
-- ✅ get_account_transfers (basic, debits-only, credits-only, with limit)
-- ✅ get_account_balances (basic, HISTORY flag handling)
-- ✅ AccountFilter support (binary 128-byte format)
-- ✅ Binary encoding/decoding
+**Go: `tests/functional_tests.go`** - Comprehensive Go tests (11 tests):
+- ✅ Account creation and lookup (create_account.lua, lookup_account.lua)
+- ✅ Duplicate account detection
+- ✅ Linked accounts with LINKED flag (create_linked_accounts.lua)
+- ✅ Linked accounts rollback on error
+- ✅ Single-phase and two-phase transfers (create_transfer.lua)
+- ✅ Transfer lookup (lookup_transfer.lua)
+- ✅ Query operations (get_account_transfers.lua, get_account_balances.lua)
+- ✅ Linked transfers rollback (create_linked_transfers.lua)
+- ✅ Balance history tracking
+- ✅ All 8 Lua scripts tested
+- ✅ Full sanity checks on all operations
 
 ```bash
+# Python tests
 cd tests
-python3 test_functional.py
-python3 test_query_functions.py
+python3 functional_tests.py
+
+# Go tests
+cd tests
+go run functional_tests.go common.go
 ```
 
-### Stress Tests (Go)
+### Performance Tests
 
-**functional_test.go** - Go functional tests:
-- Account creation, transfer creation, two-phase transfers
-- Concurrent operations
-
-**stress_test.go** - Performance testing:
+**tests/** - Stress test and benchmarks:
 - Multiple workload types: transfer, lookup, twophase, mixed
 - Hot/cold account modeling
 - Configurable workers, batch sizes, duration
 - Supports Redis, DragonflyDB, EloqKV, TigerBeetle
 
 ```bash
-cd stress_test
-go test -v functional_test.go common.go
-go build
+cd tests
+go build -o stress_test main.go common.go luabeetle_stress.go tigerbeetle_stress.go
 ./stress_test -mode=redis -workload=transfer -accounts=10000 -workers=4 -duration=30
 ```
 
@@ -459,7 +374,7 @@ go build
 Comprehensive benchmark suite (192 test configurations):
 
 ```bash
-cd stress_test
+cd tests
 ./run_benchmarks.sh                    # Run full suite (~2 hours)
 ./monitor_benchmarks.sh                # Monitor progress
 python3 analyze_results.py results/    # Analyze results
@@ -492,7 +407,7 @@ python3 analyze_results.py results/    # Analyze results
 
 ### Rollback Strategy
 
-For linked transfers (chained operations):
+For linked transfers (linked operations):
 1. Track original index length with `STRLEN` before first append
 2. On error: Use `GETRANGE 0 (original_len-1)` + `SET` to truncate
 3. If original length was 0: Use `DEL` to remove key entirely

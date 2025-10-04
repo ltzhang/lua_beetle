@@ -46,7 +46,7 @@ start_redis() {
     killall eloqkv 2>/dev/null || true
     sleep 1
     cd "$RAMDISK_DIR"
-    /home/lintaoz/database/redis/src/redis-server --dir "$RAMDISK_DIR" --daemonize yes > /dev/null 2>&1
+    redis-server --dir "$RAMDISK_DIR" --daemonize yes > /dev/null 2>&1
     sleep 2
     cd - > /dev/null
     log "Redis started (data in $RAMDISK_DIR)"
@@ -55,7 +55,7 @@ start_redis() {
 # Function to reset Redis
 reset_redis() {
     log "Resetting Redis..."
-    /home/lintaoz/database/redis/src/redis-cli FLUSHDB > /dev/null 2>&1 || true
+    redis-cli FLUSHDB > /dev/null 2>&1 || true
     rm -f "$RAMDISK_DIR/dump.rdb" 2>/dev/null || true
     sleep 1
 }
@@ -66,7 +66,7 @@ start_dragonfly() {
     killall dragonfly-x86_64 2>/dev/null || true
     sleep 1
     cd "$RAMDISK_DIR"
-    /home/lintaoz/work/lua_beetle/third_party/dragonfly-x86_64 \
+    "$SCRIPT_DIR/../third_party/dragonfly-x86_64" \
         --logtostderr --port=6380 --dir="$RAMDISK_DIR" --dbfilename=dragonfly \
         --default_lua_flags=allow-undeclared-keys > dragonfly.log 2>&1 &
     sleep 3
@@ -77,7 +77,7 @@ start_dragonfly() {
 # Function to reset DragonflyDB
 reset_dragonfly() {
     log "Resetting DragonflyDB..."
-    /home/lintaoz/database/redis/src/redis-cli -p 6380 FLUSHDB > /dev/null 2>&1 || true
+    redis-cli -p 6380 FLUSHDB > /dev/null 2>&1 || true
     rm -f "$RAMDISK_DIR/dragonfly-"* 2>/dev/null || true
     sleep 1
 }
@@ -89,7 +89,7 @@ start_eloqkv() {
     killall eloqkv 2>/dev/null || true
     sleep 1
     cd "$RAMDISK_DIR"
-    /home/lintaoz/work/lua_beetle/third_party/eloqkv > eloqkv.log 2>&1 &
+    "$SCRIPT_DIR/../third_party/eloqkv" > eloqkv.log 2>&1 &
     sleep 3
     cd - > /dev/null
     log "EloqKV started (data in $RAMDISK_DIR)"
@@ -98,7 +98,7 @@ start_eloqkv() {
 # Function to reset EloqKV
 reset_eloqkv() {
     log "Resetting EloqKV..."
-    /home/lintaoz/database/redis/src/redis-cli FLUSHDB > /dev/null 2>&1 || true
+    redis-cli FLUSHDB > /dev/null 2>&1 || true
     sleep 1
 }
 
@@ -109,8 +109,8 @@ reset_tigerbeetle() {
     sleep 2
     cd "$RAMDISK_DIR"
     rm -f 0_0.tigerbeetle tigerbeetle.log
-    /home/lintaoz/work/lua_beetle/third_party/tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle > /dev/null 2>&1
-    /home/lintaoz/work/lua_beetle/third_party/tigerbeetle start --addresses=3000 --development ./0_0.tigerbeetle > tigerbeetle.log 2>&1 &
+    "$SCRIPT_DIR/../third_party/tigerbeetle" format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle > /dev/null 2>&1
+    "$SCRIPT_DIR/../third_party/tigerbeetle" start --addresses=3000 --development ./0_0.tigerbeetle > tigerbeetle.log 2>&1 &
     sleep 3
     cd - > /dev/null
     log "TigerBeetle restarted (data in $RAMDISK_DIR)"

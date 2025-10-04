@@ -1,4 +1,4 @@
--- Create Chained Transfers Script (Binary Encoding)
+-- Create Linked Transfers Script (Binary Encoding)
 -- Handles arrays of transfers with LINKED flag support for atomic chains
 -- KEYS: none
 -- ARGV[1]: concatenated binary transfer data (128 bytes per transfer)

@@ -1,4 +1,4 @@
--- Create Chained Accounts Script (Binary Encoding)
+-- Create Linked Accounts Script (Binary Encoding)
 -- Handles arrays of accounts with LINKED flag support for atomic chains
 -- KEYS: none
 -- ARGV[1]: concatenated binary account data (128 bytes per account)

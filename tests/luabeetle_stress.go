@@ -11,8 +11,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RedisStressTest implements stress testing for Lua Beetle on Redis/DragonflyDB
-type RedisStressTest struct {
+// LuaBeetleStressTest implements stress testing for Lua Beetle on Redis/DragonflyDB
+type LuaBeetleStressTest struct {
 	client                   *redis.Client
 	config                   *StressTestConfig
 	metrics                  *TestMetrics
@@ -26,8 +26,8 @@ type RedisStressTest struct {
 	pendingTransfers         sync.Map // Track pending transfers for two-phase commits
 }
 
-// NewRedisStressTest creates a new Redis-compatible stress tester
-func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*RedisStressTest, error) {
+// NewLuaBeetleStressTest creates a new Redis-compatible stress tester
+func NewLuaBeetleStressTest(config *StressTestConfig, addr string, name string) (*LuaBeetleStressTest, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr:     addr,
 		Password: "",
@@ -41,7 +41,7 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 
 	encoder := NewBinaryEncoder()
 
-	test := &RedisStressTest{
+	test := &LuaBeetleStressTest{
 		client:  client,
 		config:  config,
 		metrics: &TestMetrics{},
@@ -58,7 +58,7 @@ func NewRedisStressTest(config *StressTestConfig, addr string, name string) (*Re
 }
 
 // loadScripts loads all Lua scripts into Redis/DragonflyDB
-func (r *RedisStressTest) loadScripts(ctx context.Context) error {
+func (r *LuaBeetleStressTest) loadScripts(ctx context.Context) error {
 	scripts := map[string]*string{
 		"../scripts/create_account.lua":        &r.createAccountSHA,
 		"../scripts/create_transfer.lua":       &r.createTransferSHA,
@@ -88,7 +88,7 @@ func (r *RedisStressTest) loadScripts(ctx context.Context) error {
 }
 
 // Setup creates initial accounts using pipelining
-func (r *RedisStressTest) Setup(ctx context.Context) error {
+func (r *LuaBeetleStressTest) Setup(ctx context.Context) error {
 	fmt.Printf("Creating %d accounts (%d hot, %d cold)...\n",
 		r.config.NumAccounts, r.config.NumHotAccounts, r.config.NumAccounts-r.config.NumHotAccounts)
 
@@ -142,17 +142,17 @@ func (r *RedisStressTest) Setup(ctx context.Context) error {
 }
 
 // Cleanup clears all test data
-func (r *RedisStressTest) Cleanup(ctx context.Context) error {
+func (r *LuaBeetleStressTest) Cleanup(ctx context.Context) error {
 	return r.client.FlushDB(ctx).Err()
 }
 
 // Close closes the Redis connection
-func (r *RedisStressTest) Close() error {
+func (r *LuaBeetleStressTest) Close() error {
 	return r.client.Close()
 }
 
 // RunWorker runs a single worker thread
-func (r *RedisStressTest) RunWorker(ctx context.Context, workerID int, wg *sync.WaitGroup) {
+func (r *LuaBeetleStressTest) RunWorker(ctx context.Context, workerID int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(workerID)))
@@ -204,7 +204,7 @@ func (r *RedisStressTest) RunWorker(ctx context.Context, workerID int, wg *sync.
 }
 
 // performTransferBatch performs a batch of regular transfers
-func (r *RedisStressTest) performTransferBatch(ctx context.Context, workerID int, counter *uint64, accountGen *HotColdGenerator) error {
+func (r *LuaBeetleStressTest) performTransferBatch(ctx context.Context, workerID int, counter *uint64, accountGen *HotColdGenerator) error {
 	pipe := r.client.Pipeline()
 
 	for i := 0; i < r.config.BatchSize; i++ {
@@ -254,7 +254,7 @@ func (r *RedisStressTest) performTransferBatch(ctx context.Context, workerID int
 }
 
 // performLookupBatch performs a batch of account lookups
-func (r *RedisStressTest) performLookupBatch(ctx context.Context, accountGen *HotColdGenerator) error {
+func (r *LuaBeetleStressTest) performLookupBatch(ctx context.Context, accountGen *HotColdGenerator) error {
 	pipe := r.client.Pipeline()
 
 	// Half lookups on hot accounts, half on random accounts
@@ -294,7 +294,7 @@ func (r *RedisStressTest) performLookupBatch(ctx context.Context, accountGen *Ho
 }
 
 // performTwoPhaseBatch performs a batch of two-phase transfers
-func (r *RedisStressTest) performTwoPhaseBatch(ctx context.Context, workerID int, counter *uint64, accountGen *HotColdGenerator, rng *rand.Rand) error {
+func (r *LuaBeetleStressTest) performTwoPhaseBatch(ctx context.Context, workerID int, counter *uint64, accountGen *HotColdGenerator, rng *rand.Rand) error {
 	pipe := r.client.Pipeline()
 
 	// Track pending transfers created in this batch
@@ -402,7 +402,7 @@ func (r *RedisStressTest) performTwoPhaseBatch(ctx context.Context, workerID int
 }
 
 // PrintLuaStats prints Lua profiling statistics from Redis
-func (r *RedisStressTest) PrintLuaStats(ctx context.Context, duration float64) {
+func (r *LuaBeetleStressTest) PrintLuaStats(ctx context.Context, duration float64) {
 	result, err := r.client.Do(ctx, "SCRIPT", "PROFILE").Result()
 	if err != nil {
 		fmt.Printf("\nWarning: failed to get Lua statistics: %v\n", err)
@@ -472,7 +472,7 @@ func getFloat64(v interface{}) float64 {
 }
 
 // Run executes the stress test
-func (r *RedisStressTest) Run(ctx context.Context) error {
+func (r *LuaBeetleStressTest) Run(ctx context.Context) error {
 	fmt.Printf("\n=== Starting %s Stress Test ===\n", r.name)
 	fmt.Printf("Workload: %s\n", r.config.Workload)
 	fmt.Printf("Workers: %d\n", r.config.NumWorkers)
