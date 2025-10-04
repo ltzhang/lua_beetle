@@ -1,362 +1,259 @@
 # Lua Beetle
 
-A Redis Lua implementation of TigerBeetle's core financial transaction APIs. Lua Beetle provides functionally equivalent operations for account management and atomic transfers using Redis as the storage backend.
+A Redis Lua implementation of TigerBeetle's core financial transaction APIs. Lua Beetle provides functionally equivalent operations for account management and atomic transfers using Redis-compatible backends (Redis, DragonflyDB, EloqKV).
 
 ## Features
 
+- ✅ **Binary Encoding**: Fixed 128-byte format for accounts/transfers (matches TigerBeetle)
 - ✅ **Account Management**: Create and lookup accounts with balance tracking
 - ✅ **Atomic Transfers**: Single-phase and two-phase (pending/post/void) transfers
 - ✅ **Double-Entry Bookkeeping**: Maintains debit/credit balance invariants
 - ✅ **Balance Constraints**: Support for overdraft protection and balance limits
-- ✅ **Linked Operations**: All-or-nothing atomic batches
-- ✅ **Transaction Safety**: Rollback on errors in linked operations
-- ✅ **Account Transfers Query**: Get all transfers for an account with timestamp filtering
-- ✅ **Balance History**: Track balance changes over time (when HISTORY flag is set)
+- ✅ **Linked Operations**: All-or-nothing atomic batches with rollback
+- ✅ **Account Filters**: Full TigerBeetle AccountFilter support (128-byte binary)
+- ✅ **Transfer Queries**: Get transfers with filtering, sorting, pagination
+- ✅ **Balance History**: Track balance snapshots (64-byte binary, HISTORY flag)
 
 ## Project Structure
 
 ```
 lua_beetle/
 ├── scripts/
-│   ├── utils.lua                  # Shared utilities and constants
-│   ├── create_accounts.lua        # Account creation script
-│   ├── create_transfers.lua       # Transfer creation script
-│   ├── lookup_accounts.lua        # Account lookup script
-│   ├── lookup_transfers.lua       # Transfer lookup script
-│   ├── get_account_transfers.lua  # Get all transfers for an account
-│   └── get_account_balances.lua   # Get balance history for an account
+│   ├── create_account.lua           # Create 1 account (binary 128-byte)
+│   ├── create_transfer.lua          # Create 1 transfer (binary 128-byte)
+│   ├── create_chained_transfers.lua # Create linked transfers with rollback
+│   ├── lookup_account.lua           # Lookup 1 account by ID
+│   ├── lookup_transfer.lua          # Lookup 1 transfer by ID
+│   ├── get_account_transfers.lua    # Query transfers with AccountFilter (128-byte)
+│   └── get_account_balances.lua     # Query balance history (64-byte snapshots)
+├── stress_test/
+│   ├── stress_test.go               # Go-based stress test suite
+│   ├── functional_test.go           # Functional tests
+│   ├── run_benchmarks.sh            # Comprehensive benchmark suite
+│   └── analyze_results.py           # Results analysis
 ├── tests/
-│   └── test_basic.py              # Test suite
+│   ├── test_functional.py           # Python functional tests
+│   └── test_query_functions.py      # Tests for query operations
 └── README.md
 ```
 
 ## Installation
 
-1. Install Redis (version 5.0+)
-2. Install Python redis client: `pip install redis`
+### Prerequisites
+- Redis 5.0+ or compatible backend (DragonflyDB, EloqKV, TigerBeetle)
+- Python 3.8+ with `redis` client: `pip install redis`
+- Go 1.19+ (for stress tests)
 
-## Quick Start
-
-### 1. Start Redis
-
-```bash
-redis-server
-```
-
-### 2. Run Tests
+### Quick Start
 
 ```bash
-cd tests
-python3 test_basic.py
+# 1. Start Redis with data in ramdisk
+mkdir -p /mnt/ramdisk/tests
+cd /mnt/ramdisk/tests
+redis-server --dir /mnt/ramdisk/tests --daemonize yes
+
+# 2. Run functional tests
+cd /home/lintaoz/work/lua_beetle/tests
+python3 test_functional.py
+python3 test_query_functions.py
+
+# 3. Run stress tests
+cd /home/lintaoz/work/lua_beetle/stress_test
+go build
+./stress_test -mode=redis -workload=transfer -accounts=10000 -workers=4 -duration=30
 ```
 
-## API Documentation
+## Data Encoding
 
-### Data Structures
+**ALL operations use binary encoding with fixed-size formats:**
 
-#### Account
-
-```json
-{
-  "id": "1",
-  "ledger": 700,
-  "code": 10,
-  "flags": 0,
-  "debits_pending": "0",
-  "debits_posted": "0",
-  "credits_pending": "0",
-  "credits_posted": "0",
-  "user_data_128": "",
-  "user_data_64": "",
-  "user_data_32": "",
-  "timestamp": "1234567890000000000"
-}
+### Account (128 bytes)
+```
+[0:16]    ID (uint128, little-endian)
+[16:32]   debits_pending (uint128)
+[32:48]   debits_posted (uint128)
+[48:64]   credits_pending (uint128)
+[64:80]   credits_posted (uint128)
+[80:96]   user_data_128 (uint128)
+[96:112]  user_data_64/user_data_32 (uint64/uint32)
+[112:116] ledger (uint32)
+[116:118] code (uint16)
+[118:120] flags (uint16)
+[120:128] timestamp/reserved (uint64)
 ```
 
-**Required Fields:**
-- `id`: Unique account identifier (non-zero string)
-- `ledger`: Ledger identifier (non-zero integer)
-- `code`: Account type code (non-zero integer)
+**Account Flags:**
+- `0x0001` - LINKED (chain operations)
+- `0x0002` - DEBITS_MUST_NOT_EXCEED_CREDITS
+- `0x0004` - CREDITS_MUST_NOT_EXCEED_DEBITS
+- `0x0008` - HISTORY (enable balance history tracking)
 
-**Account Flags (matching TigerBeetle):**
-- `0x0001` (1): `linked` - Chain account creation (all-or-nothing)
-- `0x0002` (2): `debits_must_not_exceed_credits` - Prevent overdrafts
-- `0x0004` (4): `credits_must_not_exceed_debits` - Prevent negative balances
-- `0x0008` (8): `history` - Retain balance history
-- `0x0010` (16): `imported` - Allow importing historical accounts
-- `0x0020` (32): `closed` - Prevent further transfers
-
-#### Transfer
-
-```json
-{
-  "id": "1",
-  "debit_account_id": "1",
-  "credit_account_id": "2",
-  "amount": 100,
-  "ledger": 700,
-  "code": 10,
-  "flags": 0,
-  "pending_id": "",
-  "timeout": 0,
-  "user_data_128": "",
-  "user_data_64": "",
-  "user_data_32": "",
-  "timestamp": "1234567890000000000"
-}
+### Transfer (128 bytes)
+```
+[0:16]    ID (uint128)
+[16:32]   debit_account_id (uint128)
+[32:48]   credit_account_id (uint128)
+[48:64]   amount (uint128)
+[64:80]   pending_id (uint128) - for post/void operations
+[80:96]   user_data_128 (uint128)
+[96:112]  user_data_64/user_data_32 (uint64/uint32)
+[112:116] ledger (uint32)
+[116:118] code (uint16)
+[118:120] flags (uint16)
+[120:128] timestamp (uint64)
 ```
 
-**Required Fields:**
-- `id`: Unique transfer identifier (non-zero string)
-- `debit_account_id`: Account to debit
-- `credit_account_id`: Account to credit
-- `amount`: Transfer amount (positive integer)
-- `ledger`: Ledger identifier (must match accounts)
+**Transfer Flags:**
+- `0x0001` - LINKED (chain transfers)
+- `0x0002` - PENDING (create pending transfer)
+- `0x0004` - POST_PENDING_TRANSFER (commit pending)
+- `0x0008` - VOID_PENDING_TRANSFER (cancel pending)
 
-**Transfer Flags (matching TigerBeetle):**
-- `0x0001` (1): `linked` - Chain transfer outcomes
-- `0x0002` (2): `pending` - Create pending transfer
-- `0x0004` (4): `post_pending_transfer` - Post a pending transfer
-- `0x0008` (8): `void_pending_transfer` - Void a pending transfer
-- `0x0010` (16): `balancing_debit` - Adjust based on debit constraints
-- `0x0020` (32): `balancing_credit` - Adjust based on credit constraints
-- `0x0040` (64): `closing_debit` - Close debit account
-- `0x0080` (128): `closing_credit` - Close credit account
-- `0x0100` (256): `imported` - Allow importing historical transfers
+### AccountFilter (128 bytes)
+```
+[0:16]    account_id (uint128)
+[16:32]   user_data_128 (uint128) - optional filter
+[32:40]   user_data_64 (uint64) - optional filter
+[40:44]   user_data_32 (uint32) - optional filter
+[44:46]   reserved
+[46:48]   code (uint16) - optional filter
+[48:56]   timestamp_min (uint64)
+[56:64]   timestamp_max (uint64)
+[64:68]   limit (uint32)
+[68:72]   flags (uint32)
+[72:128]  reserved
+```
 
-### Operations
+**AccountFilter Flags:**
+- `0x01` - DEBITS (include debit transfers)
+- `0x02` - CREDITS (include credit transfers)
+- `0x04` - REVERSED (reverse sort order)
 
-#### create_accounts
+### AccountBalance (64 bytes)
+```
+[0:8]     timestamp (uint64)
+[8:24]    debits_pending (uint128)
+[24:40]   debits_posted (uint128)
+[40:56]   credits_pending (uint128)
+[56:64]   credits_posted (uint128)
+```
 
-Create one or more accounts atomically.
+## API Usage
 
-**Python Example:**
+### Basic Operations
 
 ```python
 import redis
-import json
+from encoder import BinaryEncoder
 
-r = redis.Redis(decode_responses=True)
+client = redis.Redis(decode_responses=False)
+encoder = BinaryEncoder()
 
-# Load script
-with open('scripts/create_accounts.lua', 'r') as f:
-    script = r.script_load(f.read())
+# Load scripts
+with open('scripts/create_account.lua', 'r') as f:
+    create_account_sha = client.script_load(f.read())
 
-# Create accounts
-accounts = [
-    {"id": "1", "ledger": 700, "code": 10, "flags": 0},
-    {"id": "2", "ledger": 700, "code": 10, "flags": 0}
-]
+with open('scripts/create_transfer.lua', 'r') as f:
+    create_transfer_sha = client.script_load(f.read())
 
-result = r.evalsha(script, 0, json.dumps(accounts))
-print(json.loads(result))
+# Create account (binary 128 bytes)
+account_data = encoder.encode_account(
+    account_id=1,
+    ledger=700,
+    code=10,
+    flags=0x0008  # HISTORY flag
+)
+result = client.evalsha(create_account_sha, 0, account_data)
+
+# Create transfer (binary 128 bytes)
+transfer_data = encoder.encode_transfer(
+    transfer_id="tx_1",
+    debit_account_id=1,
+    credit_account_id=2,
+    amount=500,
+    ledger=700,
+    code=10,
+    flags=0
+)
+result = client.evalsha(create_transfer_sha, 0, transfer_data)
 ```
 
-**Output:**
-
-```json
-[
-  {"index": 0, "error": 0},
-  {"index": 1, "error": 0}
-]
-```
-
-#### create_transfers
-
-Create one or more transfers atomically.
-
-**Single-Phase Transfer:**
+### Two-Phase Transfers
 
 ```python
-transfers = [{
-    "id": "1",
-    "debit_account_id": "1",
-    "credit_account_id": "2",
-    "amount": 100,
-    "ledger": 700,
-    "code": 10,
-    "flags": 0
-}]
+# 1. Create pending transfer
+pending_data = encoder.encode_transfer(
+    transfer_id="pending_1",
+    debit_account_id=1,
+    credit_account_id=2,
+    amount=500,
+    ledger=700,
+    code=10,
+    flags=0x0002  # PENDING
+)
+client.evalsha(create_transfer_sha, 0, pending_data)
 
-result = r.evalsha(transfer_script, 0, json.dumps(transfers))
+# 2. Post pending transfer
+post_data = encoder.encode_transfer_with_pending(
+    transfer_id="post_1",
+    debit_account_id=1,
+    credit_account_id=2,
+    amount=500,
+    pending_id="pending_1",
+    ledger=700,
+    code=10,
+    flags=0x0004  # POST_PENDING_TRANSFER
+)
+client.evalsha(create_transfer_sha, 0, post_data)
+
+# OR: Void pending transfer
+void_data = encoder.encode_transfer_with_pending(
+    transfer_id="void_1",
+    debit_account_id=1,
+    credit_account_id=2,
+    amount=500,
+    pending_id="pending_1",
+    ledger=700,
+    code=10,
+    flags=0x0008  # VOID_PENDING_TRANSFER
+)
+client.evalsha(create_transfer_sha, 0, void_data)
 ```
 
-**Two-Phase Transfer (Pending → Post):**
+### Query Operations
 
 ```python
-# Step 1: Create pending transfer
-pending = [{
-    "id": "1",
-    "debit_account_id": "1",
-    "credit_account_id": "2",
-    "amount": 100,
-    "ledger": 700,
-    "code": 10,
-    "flags": 2  # PENDING
-}]
-
-r.evalsha(transfer_script, 0, json.dumps(pending))
-
-# Step 2: Post the pending transfer
-post = [{
-    "id": "2",
-    "pending_id": "1",
-    "debit_account_id": "1",
-    "credit_account_id": "2",
-    "amount": 100,
-    "ledger": 700,
-    "code": 10,
-    "flags": 4  # POST_PENDING_TRANSFER
-}]
-
-r.evalsha(transfer_script, 0, json.dumps(post))
-```
-
-**Two-Phase Transfer (Pending → Void):**
-
-```python
-# Void instead of post
-void = [{
-    "id": "2",
-    "pending_id": "1",
-    "debit_account_id": "1",
-    "credit_account_id": "2",
-    "amount": 100,
-    "ledger": 700,
-    "code": 10,
-    "flags": 8  # VOID_PENDING_TRANSFER
-}]
-
-r.evalsha(transfer_script, 0, json.dumps(void))
-```
-
-#### lookup_accounts
-
-Lookup accounts by IDs.
-
-```python
-with open('scripts/lookup_accounts.lua', 'r') as f:
-    lookup_script = r.script_load(f.read())
-
-result = r.evalsha(lookup_script, 0, json.dumps(["1", "2"]))
-accounts = json.loads(result)
-print(accounts)
-```
-
-#### lookup_transfers
-
-Lookup transfers by IDs.
-
-```python
-with open('scripts/lookup_transfers.lua', 'r') as f:
-    lookup_script = r.script_load(f.read())
-
-result = r.evalsha(lookup_script, 0, json.dumps(["1", "2"]))
-transfers = json.loads(result)
-print(transfers)
-```
-
-#### get_account_transfers
-
-Get all transfers for an account, ordered by timestamp.
-
-**Arguments:**
-- `ARGV[1]`: account_id (required)
-- `ARGV[2]`: timestamp_min (optional, default: -inf)
-- `ARGV[3]`: timestamp_max (optional, default: +inf)
-- `ARGV[4]`: limit (optional, default: -1 for all)
-
-```python
+# Load query scripts
 with open('scripts/get_account_transfers.lua', 'r') as f:
-    get_transfers_script = r.script_load(f.read())
+    get_transfers_sha = client.script_load(f.read())
 
-# Get all transfers for account "1"
-result = r.evalsha(get_transfers_script, 0, "1")
-transfers = json.loads(result)
-
-# Get transfers with timestamp range and limit
-result = r.evalsha(get_transfers_script, 0, "1", "1000000000", "2000000000", "10")
-transfers = json.loads(result)
-```
-
-**Output:**
-```json
-[
-  {
-    "id": "100",
-    "debit_account_id": "1",
-    "credit_account_id": "2",
-    "amount": "100",
-    "timestamp": "1234567890000000000",
-    ...
-  }
-]
-```
-
-#### get_account_balances
-
-Get current balance and history (if HISTORY flag is set) for an account.
-
-**Arguments:**
-- `ARGV[1]`: account_id (required)
-- `ARGV[2]`: timestamp_min (optional, default: -inf)
-- `ARGV[3]`: timestamp_max (optional, default: +inf)
-- `ARGV[4]`: limit (optional, default: -1 for all)
-
-```python
 with open('scripts/get_account_balances.lua', 'r') as f:
-    get_balances_script = r.script_load(f.read())
+    get_balances_sha = client.script_load(f.read())
 
-# Get balance for account "1"
-result = r.evalsha(get_balances_script, 0, "1")
-balance_data = json.loads(result)
-```
+# Get account transfers with filter
+account_filter = encoder.encode_account_filter(
+    account_id=1,
+    timestamp_min=0,
+    timestamp_max=2**64 - 1,
+    limit=10,
+    flags=0x03  # DEBITS | CREDITS
+)
+transfers_blob = client.evalsha(get_transfers_sha, 0, account_filter)
 
-**Output (without HISTORY flag):**
-```json
-{
-  "account_id": "1",
-  "current_balance": {
-    "debits_pending": "0",
-    "debits_posted": "150",
-    "credits_pending": "0",
-    "credits_posted": "50",
-    "timestamp": "1234567890000000000"
-  },
-  "history": []
-}
-```
+# Parse results (each transfer is 128 bytes)
+num_transfers = len(transfers_blob) // 128
+for i in range(num_transfers):
+    transfer = encoder.decode_transfer(transfers_blob[i*128:(i+1)*128])
+    print(transfer)
 
-**Output (with HISTORY flag):**
-```json
-{
-  "account_id": "1",
-  "current_balance": {
-    "debits_pending": "0",
-    "debits_posted": "150",
-    "credits_pending": "0",
-    "credits_posted": "50",
-    "timestamp": "1234567890000000000"
-  },
-  "history": [
-    {
-      "timestamp": 1234567890000000000,
-      "debits_pending": 0,
-      "debits_posted": 100,
-      "credits_pending": 0,
-      "credits_posted": 50,
-      "transfer_id": "1"
-    },
-    {
-      "timestamp": 1234567891000000000,
-      "debits_pending": 0,
-      "debits_posted": 150,
-      "credits_pending": 0,
-      "credits_posted": 50,
-      "transfer_id": "2"
-    }
-  ]
-}
+# Get account balance history
+balances_blob = client.evalsha(get_balances_sha, 0, account_filter)
+
+# Parse results (each balance is 64 bytes)
+num_balances = len(balances_blob) // 64
+for i in range(num_balances):
+    balance = encoder.decode_account_balance(balances_blob[i*64:(i+1)*64])
+    print(balance)
 ```
 
 ### Error Codes
@@ -475,66 +372,130 @@ account = {
 
 ## Implementation Notes
 
-### Differences from TigerBeetle
+## Key Differences from TigerBeetle
 
-1. **Storage**: Uses Redis instead of custom database
-2. **IDs**: Uses strings instead of 128-bit integers
-3. **Timestamps**: Uses Redis TIME command (microsecond precision)
-4. **Simplified Features**: Some advanced features not implemented:
-   - Query operations
-   - Account history tracking
-   - Timeout enforcement (manual cleanup required)
-   - Currency exchange helpers
-   - Rate limiting
+1. **Storage Backend**: Redis/DragonflyDB/EloqKV vs. TigerBeetle's custom LSM
+2. **Binary Format**: Fixed 128-byte encoding (compatible) but stored differently
+3. **Index Strategy**: APPEND-based with query-time processing vs. sorted indexes
+4. **Query Performance**: Full scan with filtering vs. range queries
+5. **Timestamps**: Redis TIME (microsecond precision) vs. TigerBeetle's timestamps
+
+## Performance Characteristics
+
+### Write Path (Optimized)
+- **create_transfer**: O(1) - simple APPEND operations
+- **Balance updates**: O(1) - direct field updates
+- **Index maintenance**: O(1) - APPEND (no sorting)
+- **Rollback**: O(1) - track length, truncate on error
+
+### Read Path (Query-time Processing)
+- **get_account_transfers**: O(N) where N = total transfers for account
+  - Fetches entire index, parses all entries, filters, sorts
+  - Trade-off: Slower queries for faster writes
+- **get_account_balances**: O(M) where M = total balance snapshots
+  - Only for accounts with HISTORY flag
+
+### Optimization Strategy
+- **Critical path** (writes): Minimal work, maximum throughput
+- **Non-critical path** (queries): Do all processing here
+- **Use case**: Write-heavy workloads (transfers >> queries)
 
 ### Atomicity Guarantees
+- All Lua script operations are atomic (Redis EVAL semantics)
+- No other commands execute during script execution
+- Linked transfers use explicit rollback on any error
 
-- All operations within a single Lua script are atomic
-- Redis EVAL ensures no other commands execute during script execution
-- Linked operations use explicit rollback on error
-
-### Performance Considerations
-
-- Script loading: Use `SCRIPT LOAD` once and reuse SHA
-- Batch operations: Create multiple accounts/transfers in one call
-- Connection pooling: Reuse Redis connections
+### Best Practices
+1. Use `SCRIPT LOAD` once, reuse SHA across calls
+2. Use pipelining for independent operations
+3. Use `/mnt/ramdisk/tests/` for test data (avoid disk I/O)
+4. Clean data between tests (`FLUSHDB` or restart)
 
 ## Testing
 
-The test suite covers:
+### Functional Tests (Python)
+
+**test_functional.py** - Core functionality:
 - ✅ Account creation and validation
 - ✅ Single-phase transfers
 - ✅ Two-phase transfers (pending/post/void)
 - ✅ Linked operations and rollback
 - ✅ Balance constraints
-- ✅ Lookup operations
-- ✅ Account transfers query
-- ✅ Balance history tracking
 - ✅ Error handling
 
-Run tests:
+**test_query_functions.py** - Query operations:
+- ✅ get_account_transfers (basic, debits-only, credits-only, with limit)
+- ✅ get_account_balances (basic, HISTORY flag handling)
+- ✅ AccountFilter support (binary 128-byte format)
+- ✅ Binary encoding/decoding
+
 ```bash
 cd tests
-python3 test_basic.py
+python3 test_functional.py
+python3 test_query_functions.py
+```
+
+### Stress Tests (Go)
+
+**functional_test.go** - Go functional tests:
+- Account creation, transfer creation, two-phase transfers
+- Concurrent operations
+
+**stress_test.go** - Performance testing:
+- Multiple workload types: transfer, lookup, twophase, mixed
+- Hot/cold account modeling
+- Configurable workers, batch sizes, duration
+- Supports Redis, DragonflyDB, EloqKV, TigerBeetle
+
+```bash
+cd stress_test
+go test -v functional_test.go common.go
+go build
+./stress_test -mode=redis -workload=transfer -accounts=10000 -workers=4 -duration=30
+```
+
+### Benchmark Suite
+
+Comprehensive benchmark suite (192 test configurations):
+
+```bash
+cd stress_test
+./run_benchmarks.sh                    # Run full suite (~2 hours)
+./monitor_benchmarks.sh                # Monitor progress
+python3 analyze_results.py results/    # Analyze results
 ```
 
 ## Data Storage Schema
 
-### Primary Storage
+### Primary Storage (Binary Format)
 
-- **Accounts**: `account:{id}` - Redis hash containing account data
-- **Transfers**: `transfer:{id}` - Redis hash containing transfer data
+- **Accounts**: `account:{16-byte-binary-id}` - Binary blob (128 bytes)
+- **Transfers**: `transfer:{hex-id}` - Binary blob (128 bytes)
+  - Transfer IDs are stored as hex strings in keys for Redis compatibility
 
-### Secondary Indexes
+### Secondary Indexes (APPEND-based)
 
-- **Transfer Index**: `account:{id}:transfers` - Sorted set (score=timestamp, member=transfer_id)
-  - Enables efficient `get_account_transfers` queries
-  - Automatically maintained by `create_transfers.lua`
+**Design Philosophy**: All sorting and filtering happens at query time (non-critical path). Write path uses simple APPEND for maximum performance.
 
-- **Balance History**: `account:{id}:balance_history` - Sorted set (score=timestamp, member=JSON balance snapshot)
-  - Only created when account has HISTORY flag (flag=8)
-  - Stores complete balance state after each transfer
-  - Enables time-series balance queries
+- **Transfer Index**: `account:{16-byte-binary-id}:transfers`
+  - Binary string of concatenated 16-byte transfer IDs
+  - Uses `APPEND` for O(1) writes (no sorting at write time)
+  - Fixed-size entries enable easy rollback (track length, truncate on error)
+  - Query-time: `GET` entire blob, parse chunks, filter, sort
+
+- **Balance History**: `account:{16-byte-binary-id}:balance_history`
+  - Binary string of concatenated 64-byte AccountBalance snapshots
+  - Only maintained when account has HISTORY flag (0x08)
+  - Uses `APPEND` for O(1) writes
+  - Query-time: `GET` entire blob, parse 64-byte chunks, filter, sort
+  - Each snapshot: timestamp + debits_pending/posted + credits_pending/posted
+
+### Rollback Strategy
+
+For linked transfers (chained operations):
+1. Track original index length with `STRLEN` before first append
+2. On error: Use `GETRANGE 0 (original_len-1)` + `SET` to truncate
+3. If original length was 0: Use `DEL` to remove key entirely
 
 ## License
 
