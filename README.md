@@ -330,7 +330,6 @@ account = {
 - ✅ Multiple transfers
 - ✅ All 8 Lua scripts tested
 - ✅ Full sanity checks on all operations
-- ✅ Crash on any error (per CLAUDE.md)
 
 **Go: `tests/functional_tests.go`** - Comprehensive Go tests (11 tests):
 - ✅ Account creation and lookup (create_account.lua, lookup_account.lua)
@@ -371,7 +370,7 @@ go build -o stress_test main.go common.go luabeetle_stress.go tigerbeetle_stress
 
 ### Benchmark Suite
 
-Comprehensive benchmark suite (192 test configurations):
+Comprehensive benchmark suite (448 test configurations):
 
 ```bash
 cd tests
@@ -399,11 +398,11 @@ python3 analyze_results.py results/    # Analyze results
   - Query-time: `GET` entire blob, parse chunks, filter, sort
 
 - **Balance History**: `account:{16-byte-binary-id}:balance_history`
-  - Binary string of concatenated 64-byte AccountBalance snapshots
+  - Binary string of concatenated 128-byte AccountBalance snapshots
   - Only maintained when account has HISTORY flag (0x08)
   - Uses `APPEND` for O(1) writes
-  - Query-time: `GET` entire blob, parse 64-byte chunks, filter, sort
-  - Each snapshot: timestamp + debits_pending/posted + credits_pending/posted
+  - Query-time: `GET` entire blob, parse 128-byte chunks, filter, sort
+  - Each snapshot: timestamp (8) + debits_pending/posted (32) + credits_pending/posted (32) + reserved (56)
 
 ### Rollback Strategy
 

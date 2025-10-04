@@ -278,7 +278,7 @@ This models real scenarios like exchange wallets, popular merchants, etc.
 ### Comprehensive Benchmark Suite
 
 ```bash
-# Run full benchmark suite (192 tests, ~2 hours)
+# Run full benchmark suite (448 tests, ~5 hours)
 cd tests
 ./run_benchmarks.sh
 
@@ -290,11 +290,11 @@ python3 analyze_results.py benchmark_results_<timestamp>/
 ```
 
 **Test Matrix:**
-- **Backends**: Redis, TigerBeetle
+- **Backends**: Redis, DragonflyDB, EloqKV, TigerBeetle
 - **Workloads**: transfer, lookup, twophase, mixed
-- **Hot Accounts**: 1, 10, 50, 100, 1000, 10000 (out of 100K total)
+- **Hot Accounts**: 1, 10, 50, 100, 1000, 10000, 100000 (out of 100K total)
 - **Workers**: 1, 2, 4, 8
-- **Total**: 192 test configurations
+- **Total**: 448 test configurations
 
 ### Cleaning Data Between Tests
 
