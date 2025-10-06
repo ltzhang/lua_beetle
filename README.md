@@ -54,11 +54,20 @@ lua_beetle/
 
 ### Setting Up Executables
 
-Place the following executables in the `third_party/` directory:
-- **Redis**: `redis-server` and `redis-cli`
-- **DragonflyDB**: `dragonfly-x86_64`
-- **EloqKV**: `eloqkv`
-- **TigerBeetle**: `tigerbeetle`
+**IMPORTANT**: The `third_party/` directory is **NOT** included in the repository. You must download and place the following executables in `third_party/` yourself:
+
+- **Redis**: Download from [redis.io](https://redis.io/download/) → Place `redis-server` and `redis-cli` in `third_party/`
+- **DragonflyDB**: Download from [dragonflydb.io](https://www.dragonflydb.io/) → Place `dragonfly-x86_64` in `third_party/`
+- **EloqKV**: Download from [EloqKV releases](https://github.com/c3exchange/eloqkv) → Place `eloqkv` in `third_party/`
+- **TigerBeetle**: Download from [tigerbeetle.com](https://tigerbeetle.com/) → Place `tigerbeetle` in `third_party/`
+
+```bash
+# Example setup
+mkdir -p third_party
+cd third_party
+# Download and place executables here
+chmod +x redis-server redis-cli dragonfly-x86_64 eloqkv tigerbeetle
+```
 
 All tests and benchmarks will use executables from `third_party/` by default.
 
