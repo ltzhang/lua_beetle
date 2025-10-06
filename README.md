@@ -37,23 +37,37 @@ lua_beetle/
 │   ├── run_benchmarks.sh            # Comprehensive benchmark suite
 │   ├── analyze_results.py           # Results analysis
 │   └── go.mod                       # Go module
+├── third_party/
+│   ├── redis-server                 # Redis executable
+│   ├── redis-cli                    # Redis CLI
+│   ├── dragonfly-x86_64            # DragonflyDB executable
+│   ├── eloqkv                       # EloqKV executable
+│   └── tigerbeetle                  # TigerBeetle executable
 └── README.md
 ```
 
 ## Installation
 
 ### Prerequisites
-- Redis 5.0+ or compatible backend (DragonflyDB, EloqKV, TigerBeetle)
 - Python 3.8+ with `redis` client: `pip install redis`
 - Go 1.19+ (for stress tests)
+
+### Setting Up Executables
+
+Place the following executables in the `third_party/` directory:
+- **Redis**: `redis-server` and `redis-cli`
+- **DragonflyDB**: `dragonfly-x86_64`
+- **EloqKV**: `eloqkv`
+- **TigerBeetle**: `tigerbeetle`
+
+All tests and benchmarks will use executables from `third_party/` by default.
 
 ### Quick Start
 
 ```bash
 # 1. Start Redis with data in ramdisk
 mkdir -p /mnt/ramdisk/tests
-cd /mnt/ramdisk/tests
-redis-server --dir /mnt/ramdisk/tests --daemonize yes
+./third_party/redis-server --dir /mnt/ramdisk/tests --daemonize yes
 
 # 2. Run functional tests
 cd tests
@@ -315,34 +329,8 @@ account = {
 ### Comprehensive Functional Tests
 
 **Python: `tests/functional_tests.py`** - Complete test coverage (17 tests):
-- ✅ Account creation and validation (create_account.lua)
-- ✅ Duplicate account detection
-- ✅ Linked accounts with LINKED flag (create_linked_accounts.lua)
-- ✅ Linked accounts rollback on error
-- ✅ Single-phase transfers (create_transfer.lua)
-- ✅ Nonexistent account error handling
-- ✅ Two-phase transfers: pending/post/void
-- ✅ Transfer lookup (lookup_transfer.lua)
-- ✅ Account transfers query (get_account_transfers.lua)
-- ✅ Account balances query (get_account_balances.lua)
-- ✅ Linked transfers with LINKED flag (create_linked_transfers.lua)
-- ✅ Linked transfers rollback on error
-- ✅ Multiple transfers
-- ✅ All 8 Lua scripts tested
-- ✅ Full sanity checks on all operations
 
 **Go: `tests/functional_tests.go`** - Comprehensive Go tests (11 tests):
-- ✅ Account creation and lookup (create_account.lua, lookup_account.lua)
-- ✅ Duplicate account detection
-- ✅ Linked accounts with LINKED flag (create_linked_accounts.lua)
-- ✅ Linked accounts rollback on error
-- ✅ Single-phase and two-phase transfers (create_transfer.lua)
-- ✅ Transfer lookup (lookup_transfer.lua)
-- ✅ Query operations (get_account_transfers.lua, get_account_balances.lua)
-- ✅ Linked transfers rollback (create_linked_transfers.lua)
-- ✅ Balance history tracking
-- ✅ All 8 Lua scripts tested
-- ✅ Full sanity checks on all operations
 
 ```bash
 # Python tests

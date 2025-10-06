@@ -77,16 +77,15 @@ mkdir -p /mnt/ramdisk/tests
 
 ```bash
 # Start Redis with data in ramdisk
-cd /mnt/ramdisk/tests
-/home/lintaoz/database/redis/src/redis-server \
+./third_party/redis-server \
   --dir /mnt/ramdisk/tests \
   --daemonize yes
 
 # Verify
-/home/lintaoz/database/redis/src/redis-cli ping  # Should return: PONG
+./third_party/redis-cli ping  # Should return: PONG
 
 # Stop and clean
-/home/lintaoz/database/redis/src/redis-cli shutdown
+./third_party/redis-cli shutdown
 rm -f /mnt/ramdisk/tests/dump.rdb
 
 # Check if running
@@ -102,12 +101,12 @@ pgrep redis-server
 killall redis-server 2>/dev/null
 
 # Start EloqKV with data in ramdisk
-cd /mnt/ramdisk/tests
-/path/to/eloqkv \
-  --port 6379
+./third_party/eloqkv \
+  --port 6379 \
+  --dir /mnt/ramdisk/tests
 
 # Verify (use redis-cli - it's compatible)
-redis-cli ping  # Should return: PONG
+./third_party/redis-cli ping  # Should return: PONG
 
 # Stop and clean
 killall eloqkv
@@ -131,7 +130,7 @@ pgrep eloqkv
   --default_lua_flags=allow-undeclared-keys > /mnt/ramdisk/tests/dragonfly.log 2>&1 &
 
 # Verify
-redis-cli -p 6380 ping  # Should return: PONG
+./third_party/redis-cli -p 6380 ping  # Should return: PONG
 
 # Stop and clean
 killall dragonfly-x86_64
@@ -170,8 +169,7 @@ pgrep tigerbeetle
 
 ```bash
 # Start Redis first
-cd /mnt/ramdisk/tests
-/home/lintaoz/database/redis/src/redis-server --dir /mnt/ramdisk/tests --daemonize yes
+./third_party/redis-server --dir /mnt/ramdisk/tests --daemonize yes
 
 # Run tests
 cd tests
@@ -200,8 +198,7 @@ python3 functional_tests.py
 
 ```bash
 # Start Redis first
-cd /mnt/ramdisk/tests
-/home/lintaoz/database/redis/src/redis-server --dir /mnt/ramdisk/tests --daemonize yes
+./third_party/redis-server --dir /mnt/ramdisk/tests --daemonize yes
 
 # Run tests
 cd tests
@@ -300,9 +297,9 @@ python3 analyze_results.py benchmark_results_<timestamp>/
 
 **Redis/DragonflyDB:**
 ```bash
-redis-cli FLUSHDB
+./third_party/redis-cli FLUSHDB
 # or
-redis-cli -p 6380 FLUSHDB  # DragonflyDB
+./third_party/redis-cli -p 6380 FLUSHDB  # DragonflyDB
 ```
 
 **EloqKV:**

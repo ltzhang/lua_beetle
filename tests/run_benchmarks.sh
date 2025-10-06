@@ -46,7 +46,7 @@ start_redis() {
     killall eloqkv 2>/dev/null || true
     sleep 1
     cd "$RAMDISK_DIR"
-    redis-server --dir "$RAMDISK_DIR" --daemonize yes > /dev/null 2>&1
+    "$SCRIPT_DIR/../third_party/redis-server" --dir "$RAMDISK_DIR" --daemonize yes > /dev/null 2>&1
     sleep 2
     cd - > /dev/null
     log "Redis started (data in $RAMDISK_DIR)"
@@ -55,7 +55,7 @@ start_redis() {
 # Function to reset Redis
 reset_redis() {
     log "Resetting Redis..."
-    redis-cli FLUSHDB > /dev/null 2>&1 || true
+    "$SCRIPT_DIR/../third_party/redis-cli" FLUSHDB > /dev/null 2>&1 || true
     rm -f "$RAMDISK_DIR/dump.rdb" 2>/dev/null || true
     sleep 1
 }
@@ -77,7 +77,7 @@ start_dragonfly() {
 # Function to reset DragonflyDB
 reset_dragonfly() {
     log "Resetting DragonflyDB..."
-    redis-cli -p 6380 FLUSHDB > /dev/null 2>&1 || true
+    "$SCRIPT_DIR/../third_party/redis-cli" -p 6380 FLUSHDB > /dev/null 2>&1 || true
     rm -f "$RAMDISK_DIR/dragonfly-"* 2>/dev/null || true
     sleep 1
 }
@@ -98,7 +98,7 @@ start_eloqkv() {
 # Function to reset EloqKV
 reset_eloqkv() {
     log "Resetting EloqKV..."
-    redis-cli FLUSHDB > /dev/null 2>&1 || true
+    "$SCRIPT_DIR/../third_party/redis-cli" FLUSHDB > /dev/null 2>&1 || true
     sleep 1
 }
 
