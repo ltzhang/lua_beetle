@@ -47,43 +47,67 @@ local function id_to_string(id_bytes)
     return hex
 end
 
--- Helper to extract and decode little-endian uint128
-local function decode_u128(data, offset)
-    local result = 0
-    local multiplier = 1
-    for i = 0, 15 do
-        result = result + string.byte(data, offset + i) * multiplier
-        multiplier = multiplier * 256
-        if multiplier > 1e15 then break end -- Lua number precision limit
-    end
-    return result
+local function get_u128(data, offset)
+    return string.sub(data, offset, offset + 15)
 end
 
--- Helper to encode little-endian uint128
-local function encode_u128(value)
-    local bytes = {}
+local function add_u128_bytes(left, right)
+    local carry = 0
+    local out = {}
     for i = 1, 16 do
-        bytes[i] = string.char(value % 256)
-        value = math.floor(value / 256)
+        local sum = string.byte(left, i) + string.byte(right, i) + carry
+        out[i] = string.char(sum % 256)
+        carry = math.floor(sum / 256)
     end
-    return table.concat(bytes)
+    return table.concat(out), carry
 end
 
--- Helper to add two u128 values (as binary strings)
-local function add_u128(a_data, a_offset, b_data, b_offset)
-    local a_val = decode_u128(a_data, a_offset)
-    local b_val = decode_u128(b_data, b_offset)
-    return encode_u128(a_val + b_val)
+local function sub_u128_bytes(left, right)
+    local borrow = 0
+    local out = {}
+    for i = 1, 16 do
+        local diff = string.byte(left, i) - string.byte(right, i) - borrow
+        if diff < 0 then
+            diff = diff + 256
+            borrow = 1
+        else
+            borrow = 0
+        end
+        out[i] = string.char(diff)
+    end
+    if borrow ~= 0 then
+        return nil
+    end
+    return table.concat(out)
 end
 
--- Helper to subtract b from a (as binary strings)
-local function sub_u128(a_data, a_offset, b_data, b_offset)
-    local a_val = decode_u128(a_data, a_offset)
-    local b_val = decode_u128(b_data, b_offset)
-    if a_val < b_val then
-        return nil -- Underflow
+local function add_field(data, offset, value_bytes)
+    local current = get_u128(data, offset)
+    local sum, carry = add_u128_bytes(current, value_bytes)
+    if carry ~= 0 then
+        return nil
     end
-    return encode_u128(a_val - b_val)
+    return sum
+end
+
+local function sub_field(data, offset, value_bytes)
+    local current = get_u128(data, offset)
+    return sub_u128_bytes(current, value_bytes)
+end
+
+local function compare_u128(left, right)
+    for i = 16, 1, -1 do
+        local a = string.byte(left, i)
+        local b = string.byte(right, i)
+        if a ~= b then
+            if a > b then
+                return 1
+            else
+                return -1
+            end
+        end
+    end
+    return 0
 end
 
 -- Extract fields from transfer
@@ -159,7 +183,7 @@ if is_post or is_void then
 
     local pending_transfer_key = "transfer:" .. pending_id
     local pending_transfer = redis.call('GET', pending_transfer_key)
-    if not pending_transfer then
+    if not pending_transfer or #pending_transfer ~= 128 then
         return string.char(34) .. string.rep('\0', 127) -- ERR_PENDING_TRANSFER_NOT_FOUND
     end
 
@@ -171,25 +195,52 @@ if is_post or is_void then
         return string.char(35) .. string.rep('\0', 127) -- ERR_PENDING_TRANSFER_NOT_PENDING
     end
 
-    -- Get pending transfer amount
+    local pending_debit_id = get_u128(pending_transfer, 17)
+    local pending_credit_id = get_u128(pending_transfer, 33)
     local pending_amount_bytes = extract_16bytes(pending_transfer, 49)
+
+    if pending_debit_id ~= debit_account_id or pending_credit_id ~= credit_account_id then
+        return string.char(34) .. string.rep('\0', 127) -- ERR_PENDING_TRANSFER_NOT_FOUND
+    end
+
+    if pending_amount_bytes ~= amount_bytes then
+        return string.char(34) .. string.rep('\0', 127) -- ERR_PENDING_TRANSFER_NOT_FOUND
+    end
 
     if is_post then
         -- POST_PENDING_TRANSFER: move from pending to posted
         -- Reduce pending balances
-        local debit_pending = sub_u128(debit_account, 17, pending_amount_bytes, 1)
-        local credit_pending = sub_u128(credit_account, 49, pending_amount_bytes, 1)
+        local debit_pending = sub_field(debit_account, 17, pending_amount_bytes)
+        if not debit_pending then
+            return string.char(35) .. string.rep('\0', 127) -- ERR_PENDING_TRANSFER_ALREADY_POSTED
+        end
+        local credit_pending = sub_field(credit_account, 49, pending_amount_bytes)
+        if not credit_pending then
+            return string.char(35) .. string.rep('\0', 127)
+        end
 
         -- Increase posted balances
-        local debit_posted = add_u128(debit_account, 33, pending_amount_bytes, 1)
-        local credit_posted = add_u128(credit_account, 65, pending_amount_bytes, 1)
+        local debit_posted = add_field(debit_account, 33, pending_amount_bytes)
+        if not debit_posted then
+            return string.char(42) .. string.rep('\0', 127) -- ERR_EXCEEDS_CREDITS
+        end
+        local credit_posted = add_field(credit_account, 65, pending_amount_bytes)
+        if not credit_posted then
+            return string.char(43) .. string.rep('\0', 127) -- ERR_EXCEEDS_DEBITS
+        end
 
         new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. debit_posted .. string.sub(debit_account, 49, 128)
         new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. credit_posted .. string.sub(credit_account, 81, 128)
     elseif is_void then
         -- VOID_PENDING_TRANSFER: return funds by reducing pending balances
-        local debit_pending = sub_u128(debit_account, 17, pending_amount_bytes, 1)
-        local credit_pending = sub_u128(credit_account, 49, pending_amount_bytes, 1)
+        local debit_pending = sub_field(debit_account, 17, pending_amount_bytes)
+        if not debit_pending then
+            return string.char(36) .. string.rep('\0', 127) -- ERR_PENDING_TRANSFER_ALREADY_VOIDED
+        end
+        local credit_pending = sub_field(credit_account, 49, pending_amount_bytes)
+        if not credit_pending then
+            return string.char(36) .. string.rep('\0', 127)
+        end
 
         new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. string.sub(debit_account, 33, 128)
         new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
@@ -197,15 +248,27 @@ if is_post or is_void then
 elseif is_pending then
     -- Phase 1: Create pending transfer
     -- Update debits_pending (offset 16) and credits_pending (offset 48)
-    local debit_pending = add_u128(debit_account, 17, amount_bytes, 1)
-    local credit_pending = add_u128(credit_account, 49, amount_bytes, 1)
+    local debit_pending = add_field(debit_account, 17, amount_bytes)
+    if not debit_pending then
+        return string.char(42) .. string.rep('\0', 127)
+    end
+    local credit_pending = add_field(credit_account, 49, amount_bytes)
+    if not credit_pending then
+        return string.char(43) .. string.rep('\0', 127)
+    end
 
     new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. string.sub(debit_account, 33, 128)
     new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
 else
     -- Direct posted transfer: update debits_posted (offset 32) and credits_posted (offset 64)
-    local debit_posted = add_u128(debit_account, 33, amount_bytes, 1)
-    local credit_posted = add_u128(credit_account, 65, amount_bytes, 1)
+    local debit_posted = add_field(debit_account, 33, amount_bytes)
+    if not debit_posted then
+        return string.char(42) .. string.rep('\0', 127)
+    end
+    local credit_posted = add_field(credit_account, 65, amount_bytes)
+    if not credit_posted then
+        return string.char(43) .. string.rep('\0', 127)
+    end
 
     new_debit_account = string.sub(debit_account, 1, 32) .. debit_posted .. string.sub(debit_account, 49, 128)
     new_credit_account = string.sub(credit_account, 1, 64) .. credit_posted .. string.sub(credit_account, 81, 128)
@@ -219,24 +282,44 @@ local ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 0x0002
 local ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 0x0004
 
 if (math.floor(debit_flags / ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS) % 2) == 1 then
-    local debit_total = decode_u128(new_debit_account, 33) + decode_u128(new_debit_account, 17)
-    local credit_total = decode_u128(new_debit_account, 65) + decode_u128(new_debit_account, 49)
-    if debit_total > credit_total then
-        return string.char(58) .. string.rep('\0', 127) -- ERR_EXCEEDS_CREDITS = 58
+    local debit_posted_bytes = get_u128(new_debit_account, 33)
+    local debit_pending_bytes = get_u128(new_debit_account, 17)
+    local debit_total, debit_overflow = add_u128_bytes(debit_posted_bytes, debit_pending_bytes)
+    if debit_overflow ~= 0 then
+        return string.char(42) .. string.rep('\0', 127)
+    end
+    local credit_posted_bytes = get_u128(new_debit_account, 65)
+    local credit_pending_bytes = get_u128(new_debit_account, 49)
+    local credit_total, credit_overflow = add_u128_bytes(credit_posted_bytes, credit_pending_bytes)
+    if credit_overflow ~= 0 then
+        return string.char(43) .. string.rep('\0', 127)
+    end
+    if compare_u128(debit_total, credit_total) == 1 then
+        return string.char(42) .. string.rep('\0', 127) -- ERR_EXCEEDS_CREDITS
     end
 end
 
 if (math.floor(credit_flags / ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS) % 2) == 1 then
-    local credit_total = decode_u128(new_credit_account, 65) + decode_u128(new_credit_account, 49)
-    local debit_total = decode_u128(new_credit_account, 33) + decode_u128(new_credit_account, 17)
-    if credit_total > debit_total then
-        return string.char(59) .. string.rep('\0', 127) -- ERR_EXCEEDS_DEBITS = 59
+    local credit_posted_bytes = get_u128(new_credit_account, 65)
+    local credit_pending_bytes = get_u128(new_credit_account, 49)
+    local credit_total, credit_overflow = add_u128_bytes(credit_posted_bytes, credit_pending_bytes)
+    if credit_overflow ~= 0 then
+        return string.char(43) .. string.rep('\0', 127)
+    end
+    local debit_posted_bytes = get_u128(new_credit_account, 33)
+    local debit_pending_bytes = get_u128(new_credit_account, 17)
+    local debit_total, debit_overflow = add_u128_bytes(debit_posted_bytes, debit_pending_bytes)
+    if debit_overflow ~= 0 then
+        return string.char(42) .. string.rep('\0', 127)
+    end
+    if compare_u128(credit_total, debit_total) == 1 then
+        return string.char(43) .. string.rep('\0', 127) -- ERR_EXCEEDS_DEBITS
     end
 end
 
 -- Prepare transfer with timestamp
 local transfer_with_ts
-local IMPORTED_FLAG = 0x0010  -- For transfers, imported is 0x0010
+local IMPORTED_FLAG = 0x0100  -- Custom flag to allow client timestamp injection
 
 -- Only set timestamp if imported flag is NOT set
 if (math.floor(flags / IMPORTED_FLAG) % 2) == 0 then

@@ -46,10 +46,10 @@ end
 
 -- Prepare account data with timestamp
 local account_with_ts
-local IMPORTED_FLAG = 0x0002
+local IMPORTED_FLAG = 0x0100
 
 -- Only set timestamp if imported flag is NOT set
-if (flags % 4) < 2 then
+if (math.floor(flags / IMPORTED_FLAG) % 2) == 0 then
     -- imported flag is NOT set, server sets timestamp
     -- TODO: EloqKV doesn't support TIME command in Lua scripts, using arbitrary timestamp
     -- local timestamp = redis.call('TIME')

@@ -33,31 +33,78 @@ local function extract_16bytes(data, offset)
     return string.sub(data, offset, offset + 15)
 end
 
-local function decode_u128(data, offset)
-    local result = 0
-    local multiplier = 1
-    for i = 0, 15 do
-        result = result + string.byte(data, offset + i) * multiplier
-        multiplier = multiplier * 256
-        if multiplier > 1e15 then break end
+local function id_to_hex(id_bytes)
+    local hex_chars = {}
+    for i = 1, #id_bytes do
+        hex_chars[i] = string.format("%02x", string.byte(id_bytes, i))
     end
-    return result
+    return table.concat(hex_chars)
 end
 
-local function encode_u128(value)
-    local bytes = {}
+local function get_u128(data, offset)
+    return string.sub(data, offset, offset + 15)
+end
+
+local function add_u128_bytes(left, right)
+    local carry = 0
+    local out = {}
     for i = 1, 16 do
-        bytes[i] = string.char(value % 256)
-        value = math.floor(value / 256)
+        local sum = string.byte(left, i) + string.byte(right, i) + carry
+        out[i] = string.char(sum % 256)
+        carry = math.floor(sum / 256)
     end
-    return table.concat(bytes)
+    return table.concat(out), carry
 end
 
-local function add_u128(a_data, a_offset, b_data, b_offset)
-    local a_val = decode_u128(a_data, a_offset)
-    local b_val = decode_u128(b_data, b_offset)
-    return encode_u128(a_val + b_val)
+local function sub_u128_bytes(left, right)
+    local borrow = 0
+    local out = {}
+    for i = 1, 16 do
+        local diff = string.byte(left, i) - string.byte(right, i) - borrow
+        if diff < 0 then
+            diff = diff + 256
+            borrow = 1
+        else
+            borrow = 0
+        end
+        out[i] = string.char(diff)
+    end
+    if borrow ~= 0 then
+        return nil
+    end
+    return table.concat(out)
 end
+
+local function add_field(data, offset, value_bytes)
+    local current = get_u128(data, offset)
+    local sum, carry = add_u128_bytes(current, value_bytes)
+    if carry ~= 0 then
+        return nil
+    end
+    return sum
+end
+
+local function sub_field(data, offset, value_bytes)
+    local current = get_u128(data, offset)
+    return sub_u128_bytes(current, value_bytes)
+end
+
+local function compare_u128(left, right)
+    for i = 16, 1, -1 do
+        local a = string.byte(left, i)
+        local b = string.byte(right, i)
+        if a ~= b then
+            if a > b then
+                return 1
+            else
+                return -1
+            end
+        end
+    end
+    return 0
+end
+
+local ZERO_ID = string.rep('\0', 16)
 
 -- Get timestamp once (for non-imported transfers)
 -- TODO: EloqKV doesn't support TIME command in Lua scripts, using arbitrary timestamp
@@ -81,7 +128,9 @@ local modified_accounts = {}
 local index_original_lengths = {} -- Track original lengths for rollback
 
 local FLAG_PENDING = 0x0002
-local FLAG_IMPORTED = 0x0010
+local FLAG_POST_PENDING = 0x0004
+local FLAG_VOID_PENDING = 0x0008
+local FLAG_IMPORTED = 0x0100
 local ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 0x0002
 local ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 0x0004
 
@@ -91,6 +140,7 @@ for i = 0, num_transfers - 1 do
 
     -- Extract fields
     local transfer_id = extract_16bytes(transfer_data, 1)
+    local transfer_id_hex = id_to_hex(transfer_id)
     local debit_account_id = extract_16bytes(transfer_data, 17)
     local credit_account_id = extract_16bytes(transfer_data, 33)
     local amount_bytes = extract_16bytes(transfer_data, 49)
@@ -113,7 +163,7 @@ for i = 0, num_transfers - 1 do
 
     -- Check if transfer exists
     if error_code == 0 then
-        local transfer_key = "transfer:" .. transfer_id
+        local transfer_key = "transfer:" .. transfer_id_hex
         if redis.call('EXISTS', transfer_key) == 1 then
             error_code = 29 -- ERR_EXISTS_WITH_DIFFERENT_FLAGS
         end
@@ -146,36 +196,142 @@ for i = 0, num_transfers - 1 do
         if transfer_ledger ~= debit_ledger or transfer_ledger ~= credit_ledger then
             error_code = 52 -- ERR_LEDGER_MUST_MATCH
         else
-            -- Update balances
-            if is_pending then
-                local debit_pending = add_u128(debit_account, 17, amount_bytes, 1)
-                local credit_pending = add_u128(credit_account, 49, amount_bytes, 1)
-                new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. string.sub(debit_account, 33, 128)
-                new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
+            new_debit_account = debit_account
+            new_credit_account = credit_account
+
+            local is_post = (math.floor(flags / FLAG_POST_PENDING) % 2) == 1
+            local is_void = (math.floor(flags / FLAG_VOID_PENDING) % 2) == 1
+            local pending_id_raw = extract_16bytes(transfer_data, 65)
+            local pending_id_hex = id_to_hex(pending_id_raw)
+
+            if is_post or is_void then
+                if pending_id_raw == ZERO_ID then
+                    error_code = 33 -- ERR_PENDING_ID_REQUIRED
+                else
+                    local pending_transfer_key = "transfer:" .. pending_id_hex
+                    local pending_transfer = redis.call('GET', pending_transfer_key)
+                    if not pending_transfer or #pending_transfer ~= 128 then
+                        error_code = 34 -- ERR_PENDING_TRANSFER_NOT_FOUND
+                    else
+                        local pending_flags = string.byte(pending_transfer, 119) + string.byte(pending_transfer, 120) * 256
+                        local pending_is_pending = (math.floor(pending_flags / FLAG_PENDING) % 2) == 1
+                        if not pending_is_pending then
+                            error_code = 35 -- ERR_PENDING_TRANSFER_ALREADY_POSTED
+                        else
+                            local pending_debit_id = get_u128(pending_transfer, 17)
+                            local pending_credit_id = get_u128(pending_transfer, 33)
+                            local pending_amount_bytes = extract_16bytes(pending_transfer, 49)
+
+                            if pending_debit_id ~= debit_account_id or pending_credit_id ~= credit_account_id or pending_amount_bytes ~= amount_bytes then
+                                error_code = 34
+                            else
+                                if is_post then
+                                    local debit_pending = sub_field(debit_account, 17, pending_amount_bytes)
+                                    if not debit_pending then
+                                        error_code = 35
+                                    else
+                                        local credit_pending = sub_field(credit_account, 49, pending_amount_bytes)
+                                        if not credit_pending then
+                                            error_code = 35
+                                        else
+                                            local debit_posted = add_field(debit_account, 33, pending_amount_bytes)
+                                            if not debit_posted then
+                                                error_code = 42
+                                            else
+                                                local credit_posted = add_field(credit_account, 65, pending_amount_bytes)
+                                                if not credit_posted then
+                                                    error_code = 43
+                                                else
+                                                    new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. debit_posted .. string.sub(debit_account, 49, 128)
+                                                    new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. credit_posted .. string.sub(credit_account, 81, 128)
+                                                end
+                                            end
+                                        end
+                                    end
+                                else
+                                    local debit_pending = sub_field(debit_account, 17, pending_amount_bytes)
+                                    if not debit_pending then
+                                        error_code = 36 -- ERR_PENDING_TRANSFER_ALREADY_VOIDED
+                                    else
+                                        local credit_pending = sub_field(credit_account, 49, pending_amount_bytes)
+                                        if not credit_pending then
+                                            error_code = 36
+                                        else
+                                            new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. string.sub(debit_account, 33, 128)
+                                            new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            elseif is_pending then
+                local debit_pending = add_field(debit_account, 17, amount_bytes)
+                if not debit_pending then
+                    error_code = 42
+                else
+                    local credit_pending = add_field(credit_account, 49, amount_bytes)
+                    if not credit_pending then
+                        error_code = 43
+                    else
+                        new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. string.sub(debit_account, 33, 128)
+                        new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
+                    end
+                end
             else
-                local debit_posted = add_u128(debit_account, 33, amount_bytes, 1)
-                local credit_posted = add_u128(credit_account, 65, amount_bytes, 1)
-                new_debit_account = string.sub(debit_account, 1, 32) .. debit_posted .. string.sub(debit_account, 49, 128)
-                new_credit_account = string.sub(credit_account, 1, 64) .. credit_posted .. string.sub(credit_account, 81, 128)
-            end
-
-            -- Check balance constraints
-            local debit_flags = string.byte(debit_account, 119) + string.byte(debit_account, 120) * 256
-            local credit_flags = string.byte(credit_account, 119) + string.byte(credit_account, 120) * 256
-
-            if (math.floor(debit_flags / ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS) % 2) == 1 then
-                local debit_total = decode_u128(new_debit_account, 33) + decode_u128(new_debit_account, 17)
-                local credit_total = decode_u128(new_debit_account, 65) + decode_u128(new_debit_account, 49)
-                if debit_total > credit_total then
-                    error_code = 58 -- ERR_EXCEEDS_CREDITS
+                local debit_posted = add_field(debit_account, 33, amount_bytes)
+                if not debit_posted then
+                    error_code = 42
+                else
+                    local credit_posted = add_field(credit_account, 65, amount_bytes)
+                    if not credit_posted then
+                        error_code = 43
+                    else
+                        new_debit_account = string.sub(debit_account, 1, 32) .. debit_posted .. string.sub(debit_account, 49, 128)
+                        new_credit_account = string.sub(credit_account, 1, 64) .. credit_posted .. string.sub(credit_account, 81, 128)
+                    end
                 end
             end
 
-            if error_code == 0 and (math.floor(credit_flags / ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS) % 2) == 1 then
-                local credit_total = decode_u128(new_credit_account, 65) + decode_u128(new_credit_account, 49)
-                local debit_total = decode_u128(new_credit_account, 33) + decode_u128(new_credit_account, 17)
-                if credit_total > debit_total then
-                    error_code = 59 -- ERR_EXCEEDS_DEBITS
+            if error_code == 0 then
+                local debit_flags = string.byte(new_debit_account, 119) + string.byte(new_debit_account, 120) * 256
+                local credit_flags = string.byte(new_credit_account, 119) + string.byte(new_credit_account, 120) * 256
+
+                if (math.floor(debit_flags / ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS) % 2) == 1 then
+                    local debit_posted_bytes = get_u128(new_debit_account, 33)
+                    local debit_pending_bytes = get_u128(new_debit_account, 17)
+                    local debit_total, debit_overflow = add_u128_bytes(debit_posted_bytes, debit_pending_bytes)
+                    if debit_overflow ~= 0 then
+                        error_code = 42
+                    else
+                        local credit_posted_bytes = get_u128(new_debit_account, 65)
+                        local credit_pending_bytes = get_u128(new_debit_account, 49)
+                        local credit_total, credit_overflow = add_u128_bytes(credit_posted_bytes, credit_pending_bytes)
+                        if credit_overflow ~= 0 then
+                            error_code = 43
+                        elseif compare_u128(debit_total, credit_total) == 1 then
+                            error_code = 42
+                        end
+                    end
+                end
+
+                if error_code == 0 and (math.floor(credit_flags / ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS) % 2) == 1 then
+                    local credit_posted_bytes = get_u128(new_credit_account, 65)
+                    local credit_pending_bytes = get_u128(new_credit_account, 49)
+                    local credit_total, credit_overflow = add_u128_bytes(credit_posted_bytes, credit_pending_bytes)
+                    if credit_overflow ~= 0 then
+                        error_code = 43
+                    else
+                        local debit_posted_bytes = get_u128(new_credit_account, 33)
+                        local debit_pending_bytes = get_u128(new_credit_account, 17)
+                        local debit_total, debit_overflow = add_u128_bytes(debit_posted_bytes, debit_pending_bytes)
+                        if debit_overflow ~= 0 then
+                            error_code = 42
+                        elseif compare_u128(credit_total, debit_total) == 1 then
+                            error_code = 43
+                        end
+                    end
                 end
             end
         end
@@ -188,7 +344,8 @@ for i = 0, num_transfers - 1 do
             for j = chain_start, i - 1 do
                 local rb_offset = j * 128 + 1
                 local rb_id = extract_16bytes(transfers_data, rb_offset)
-                redis.call('DEL', "transfer:" .. rb_id)
+                local rb_id_hex = id_to_hex(rb_id)
+                redis.call('DEL', "transfer:" .. rb_id_hex)
 
                 -- Restore modified accounts
                 local rb_debit_id = extract_16bytes(transfers_data, rb_offset + 16)
@@ -251,7 +408,7 @@ for i = 0, num_transfers - 1 do
 
         local debit_key = "account:" .. debit_account_id
         local credit_key = "account:" .. credit_account_id
-        local transfer_key = "transfer:" .. transfer_id
+        local transfer_key = "transfer:" .. transfer_id_hex
 
         redis.call('SET', debit_key, new_debit_account)
         redis.call('SET', credit_key, new_credit_account)
@@ -282,7 +439,7 @@ for i = 0, num_transfers - 1 do
         local debit_has_history = (math.floor(debit_flags_val / ACCOUNT_FLAG_HISTORY) % 2) == 1
         local credit_has_history = (math.floor(credit_flags_val / ACCOUNT_FLAG_HISTORY) % 2) == 1
 
-        -- Helper: encode AccountBalance (64 bytes)
+        -- Helper: encode AccountBalance (128 bytes)
         local function encode_account_balance(account_data, transfer_ts)
             -- Extract timestamp from transfer_with_ts
             local ts_bytes = string.sub(transfer_with_ts, 121, 128)
@@ -293,8 +450,9 @@ for i = 0, num_transfers - 1 do
             local credits_pending = string.sub(account_data, 49, 64)  -- offset 48, 16 bytes
             local credits_posted = string.sub(account_data, 65, 80)   -- offset 64, 16 bytes
 
-            -- Return 64-byte AccountBalance: timestamp + balances
-            return ts_bytes .. debits_pending .. debits_posted .. credits_pending .. credits_posted
+            -- Return 128-byte AccountBalance: timestamp + balances + reserved (56 zero bytes)
+            local reserved = string.rep('\0', 56)
+            return ts_bytes .. debits_pending .. debits_posted .. credits_pending .. credits_posted .. reserved
         end
 
         if debit_has_history then
@@ -340,7 +498,8 @@ if chain_start ~= nil then
     for j = chain_start, num_transfers - 1 do
         local rb_offset = j * 128 + 1
         local rb_id = extract_16bytes(transfers_data, rb_offset)
-        redis.call('DEL', "transfer:" .. rb_id)
+        local rb_id_hex = id_to_hex(rb_id)
+        redis.call('DEL', "transfer:" .. rb_id_hex)
 
         local rb_debit_id = extract_16bytes(transfers_data, rb_offset + 16)
         local rb_credit_id = extract_16bytes(transfers_data, rb_offset + 32)

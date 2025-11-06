@@ -47,7 +47,7 @@ local ts_bytes = string.char(
     math.floor(ts / 72057594037927936) % 256
 )
 
-local IMPORTED_FLAG = 0x0002
+local IMPORTED_FLAG = 0x0100
 
 for i = 0, num_accounts - 1 do
     local offset = i * 128 + 1
@@ -57,7 +57,7 @@ for i = 0, num_accounts - 1 do
     local id = string.sub(account_data, 1, 16)
     local flags = string.byte(account_data, 119) + string.byte(account_data, 120) * 256
     local is_linked = (flags % 2) == 1  -- LINKED flag is 0x0001
-    local is_imported = (flags % 4) >= 2  -- IMPORTED flag is 0x0002
+    local is_imported = (math.floor(flags / IMPORTED_FLAG) % 2) == 1
 
     local error_code = 0
     local key = "account:" .. id
