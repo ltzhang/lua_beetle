@@ -22,7 +22,7 @@ local account_data = ARGV[1]
 
 -- Validate size
 if #account_data ~= 128 then
-    return string.char(32) .. string.rep('\0', 127) -- ERR_INVALID_DATA_SIZE = 32
+    return lb_result(32) -- ERR_INVALID_DATA_SIZE
 end
 
 -- Extract id (first 16 bytes) for key
@@ -31,7 +31,7 @@ local key = "account:" .. id
 
 -- Check if account already exists
 if redis.call('EXISTS', key) == 1 then
-    return string.char(21) .. string.rep('\0', 127) -- ERR_EXISTS = 21
+    return lb_result(21) -- ERR_EXISTS
 end
 
 -- Extract flags (2 bytes at offset 118)
@@ -40,44 +40,27 @@ local flags_byte2 = string.byte(account_data, 120)
 local flags = flags_byte1 + flags_byte2 * 256
 
 -- Check for LINKED flag (0x0001)
-if (flags % 2) == 1 then
-    return string.char(1) .. string.rep('\0', 127) -- ERR_LINKED_EVENT_CHAIN_OPEN = 1
+if lb_has_flag(flags, 0x0001) then
+    return lb_result(1) -- ERR_LINKED_EVENT_CHAIN_OPEN
 end
 
 -- Prepare account data with timestamp
 local account_with_ts
 local IMPORTED_FLAG = 0x0100
+local DEFAULT_TIMESTAMP = lb_encode_u64(1000000000000000000)
 
 -- Only set timestamp if imported flag is NOT set
-if (math.floor(flags / IMPORTED_FLAG) % 2) == 0 then
+if not lb_has_flag(flags, IMPORTED_FLAG) then
     -- imported flag is NOT set, server sets timestamp
     -- TODO: EloqKV doesn't support TIME command in Lua scripts, using arbitrary timestamp
-    -- local timestamp = redis.call('TIME')
-    -- local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
-    local ts = 1000000000000000000  -- Arbitrary timestamp for EloqKV compatibility
-
-    account_with_ts = string.sub(account_data, 1, 120) ..
-                      string.char(
-                          ts % 256,
-                          math.floor(ts / 256) % 256,
-                          math.floor(ts / 65536) % 256,
-                          math.floor(ts / 16777216) % 256,
-                          math.floor(ts / 4294967296) % 256,
-                          math.floor(ts / 1099511627776) % 256,
-                          math.floor(ts / 281474976710656) % 256,
-                          math.floor(ts / 72057594037927936) % 256
-                      )
+    account_with_ts = string.sub(account_data, 1, 120) .. DEFAULT_TIMESTAMP
 else
     -- imported flag IS set, use client-provided timestamp (must be non-zero)
-    local ts_bytes = string.sub(account_data, 121, 128)
-    local ts = 0
-    for i = 1, 8 do
-        ts = ts + string.byte(ts_bytes, i) * (256 ^ (i - 1))
-    end
+    local ts = lb_decode_u64(account_data, 121)
 
     -- Timestamp must be non-zero when imported flag is set
     if ts == 0 then
-        return string.char(32) .. string.rep('\0', 127) -- ERR_INVALID_DATA_SIZE = 32 (or could use different error)
+        return lb_result(32) -- ERR_INVALID_DATA_SIZE
     end
 
     account_with_ts = account_data
@@ -87,4 +70,4 @@ end
 redis.call('SET', key, account_with_ts)
 
 -- Return success (ERR_OK = 0)
-return string.char(0) .. string.rep('\0', 127)
+return lb_result(0)

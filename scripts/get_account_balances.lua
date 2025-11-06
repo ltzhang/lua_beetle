@@ -32,39 +32,12 @@ if #filter_data ~= 128 then
     return "" -- Invalid filter
 end
 
--- Helper: decode uint64 from bytes (little-endian)
-local function decode_u64(data, offset)
-    local value = 0
-    for i = 0, 7 do
-        value = value + string.byte(data, offset + i) * (2 ^ (i * 8))
-    end
-    return value
-end
-
--- Helper: decode uint32 from bytes (little-endian)
-local function decode_u32(data, offset)
-    local value = 0
-    for i = 0, 3 do
-        value = value + string.byte(data, offset + i) * (2 ^ (i * 8))
-    end
-    return value
-end
-
--- Helper: convert 16-byte binary ID to hex string for Redis keys
-local function id_to_string(id_bytes)
-    local hex = ""
-    for i = 1, #id_bytes do
-        hex = hex .. string.format("%02x", string.byte(id_bytes, i))
-    end
-    return hex
-end
-
 -- Parse AccountFilter
 local account_id = string.sub(filter_data, 1, 16)
-local timestamp_min = decode_u64(filter_data, 49)
-local timestamp_max = decode_u64(filter_data, 57)
-local limit = decode_u32(filter_data, 65)
-local flags = decode_u32(filter_data, 69)
+local timestamp_min = lb_decode_u64(filter_data, 49)
+local timestamp_max = lb_decode_u64(filter_data, 57)
+local limit = lb_decode_u32(filter_data, 65)
+local flags = lb_decode_u32(filter_data, 69)
 
 -- Parse flags
 local FLAG_REVERSED = 0x04
@@ -96,7 +69,7 @@ local account_flags = account_flags_byte1 + account_flags_byte2 * 256
 
 -- Account flag for history: 0x08
 local ACCOUNT_FLAG_HISTORY = 0x08
-local has_history = (math.floor(account_flags / ACCOUNT_FLAG_HISTORY) % 2) == 1
+local has_history = lb_has_flag(account_flags, ACCOUNT_FLAG_HISTORY)
 
 if not has_history then
     return "" -- Account doesn't have history flag set
@@ -118,11 +91,11 @@ local num_balances = #balance_blob / 128
 local candidates = {}
 for i = 0, num_balances - 1 do
     local balance_data = string.sub(balance_blob, i * 128 + 1, i * 128 + 128)
-    local timestamp = decode_u64(balance_data, 1)
+    local timestamp = lb_decode_u64(balance_data, 1)
 
     -- Apply timestamp filter
     if timestamp >= timestamp_min and timestamp <= timestamp_max then
-        table.insert(candidates, {timestamp = timestamp, data = balance_data})
+        candidates[#candidates + 1] = {timestamp = timestamp, data = balance_data}
     end
 end
 
@@ -142,7 +115,7 @@ end)
 -- Apply limit and extract balance data
 local results = {}
 for i = 1, math.min(limit, #candidates) do
-    table.insert(results, candidates[i].data)
+    results[#results + 1] = candidates[i].data
 end
 
 -- Return concatenated binary balances

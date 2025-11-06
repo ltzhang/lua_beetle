@@ -24,90 +24,33 @@ if #filter_data ~= 128 then
     return "" -- Invalid filter
 end
 
--- Helper: decode uint128 from bytes (little-endian)
-local function decode_u128(data, offset)
-    local low = 0
-    local high = 0
-    for i = 0, 7 do
-        low = low + string.byte(data, offset + i) * (2 ^ (i * 8))
-    end
-    for i = 0, 7 do
-        high = high + string.byte(data, offset + 8 + i) * (2 ^ (i * 8))
-    end
-    return {low = low, high = high}
-end
-
--- Helper: decode uint64 from bytes (little-endian)
-local function decode_u64(data, offset)
-    local value = 0
-    for i = 0, 7 do
-        value = value + string.byte(data, offset + i) * (2 ^ (i * 8))
-    end
-    return value
-end
-
--- Helper: decode uint32 from bytes (little-endian)
-local function decode_u32(data, offset)
-    local value = 0
-    for i = 0, 3 do
-        value = value + string.byte(data, offset + i) * (2 ^ (i * 8))
-    end
-    return value
-end
-
--- Helper: decode uint16 from bytes (little-endian)
-local function decode_u16(data, offset)
-    return string.byte(data, offset) + string.byte(data, offset + 1) * 256
-end
-
--- Helper: compare u128 values (returns -1, 0, or 1)
-local function compare_u128(a, b)
-    if a.high < b.high then return -1 end
-    if a.high > b.high then return 1 end
-    if a.low < b.low then return -1 end
-    if a.low > b.low then return 1 end
-    return 0
-end
-
--- Helper: check if u128 is zero
-local function is_u128_zero(v)
-    return v.low == 0 and v.high == 0
-end
-
--- Helper: convert 16-byte binary ID to hex string for Redis keys
-local function id_to_string(id_bytes)
-    local hex = ""
-    for i = 1, #id_bytes do
-        hex = hex .. string.format("%02x", string.byte(id_bytes, i))
-    end
-    return hex
-end
-
 -- Parse AccountFilter
 local account_id = string.sub(filter_data, 1, 16)
-local user_data_128 = decode_u128(filter_data, 17)
-local user_data_64 = decode_u64(filter_data, 33)
-local user_data_32 = decode_u32(filter_data, 41)
-local code_filter = decode_u16(filter_data, 47)
-local timestamp_min = decode_u64(filter_data, 49)
-local timestamp_max = decode_u64(filter_data, 57)
-local limit = decode_u32(filter_data, 65)
-local flags = decode_u32(filter_data, 69)
+local user_data_128_filter = string.sub(filter_data, 17, 32)
+local user_data_64 = lb_decode_u64(filter_data, 33)
+local user_data_32 = lb_decode_u32(filter_data, 41)
+local code_filter = lb_decode_u16(filter_data, 47)
+local timestamp_min = lb_decode_u64(filter_data, 49)
+local timestamp_max = lb_decode_u64(filter_data, 57)
+local limit = lb_decode_u32(filter_data, 65)
+local flags = lb_decode_u32(filter_data, 69)
 
 -- Parse flags
 local FLAG_DEBITS = 0x01
 local FLAG_CREDITS = 0x02
 local FLAG_REVERSED = 0x04
 
-local include_debits = (flags % (FLAG_DEBITS * 2)) >= FLAG_DEBITS
-local include_credits = (math.floor(flags / FLAG_CREDITS) % 2) == 1
-local reversed = (math.floor(flags / FLAG_REVERSED) % 2) == 1
+local include_debits = lb_has_flag(flags, FLAG_DEBITS)
+local include_credits = lb_has_flag(flags, FLAG_CREDITS)
+local reversed = lb_has_flag(flags, FLAG_REVERSED)
 
 -- If neither debits nor credits specified, include both
 if not include_debits and not include_credits then
     include_debits = true
     include_credits = true
 end
+
+local filter_user_data_128_active = user_data_128_filter ~= lb_zero_16
 
 -- Validate limit
 if limit == 0 then
@@ -130,77 +73,67 @@ end
 
 -- Each transfer ID is 16 bytes
 local num_transfers = #transfer_ids_blob / 16
+local transfer_ids = {}
+for i = 1, num_transfers do
+    local offset = (i - 1) * 16 + 1
+    transfer_ids[i] = string.sub(transfer_ids_blob, offset, offset + 15)
+end
 
--- Fetch all transfers and filter
 local candidates = {}
-for i = 0, num_transfers - 1 do
-    local transfer_id_raw = string.sub(transfer_ids_blob, i * 16 + 1, i * 16 + 16)
-    local transfer_id_hex = id_to_string(transfer_id_raw)
-    local transfer_key = "transfer:" .. transfer_id_hex
-    local transfer = redis.call('GET', transfer_key)
+local batch_keys = {}
+local batch_ids = {}
+local BATCH_SIZE = 64
 
-    if transfer and #transfer == 128 then
-        -- Extract transfer fields for filtering
-        local debit_account_id = string.sub(transfer, 17, 32)
-        local credit_account_id = string.sub(transfer, 33, 48)
-        local timestamp = decode_u64(transfer, 121)
+for i = 1, num_transfers do
+    local raw_id = transfer_ids[i]
+    batch_ids[#batch_ids + 1] = raw_id
+    batch_keys[#batch_keys + 1] = "transfer:" .. lb_hex16(raw_id)
 
-        -- Check if this transfer involves the account as debit or credit
-        local is_debit = (debit_account_id == account_id)
-        local is_credit = (credit_account_id == account_id)
+    if #batch_keys == BATCH_SIZE or i == num_transfers then
+        local fetched = redis.call('MGET', unpack(batch_keys))
+        for j = 1, #fetched do
+            local transfer = fetched[j]
+            if transfer and #transfer == 128 then
+                local debit_account_id = lb_slice16(transfer, 17)
+                local credit_account_id = lb_slice16(transfer, 33)
+                local timestamp = lb_decode_u64(transfer, 121)
 
-        -- Apply debits/credits filter
-        local include = false
-        if is_debit and include_debits then
-            include = true
-        end
-        if is_credit and include_credits then
-            include = true
-        end
-
-        if include then
-            -- Apply timestamp filter
-            if timestamp >= timestamp_min and timestamp <= timestamp_max then
-                -- Apply optional filters
-                local matches = true
-
-                -- Filter by user_data_128
-                if not is_u128_zero(user_data_128) then
-                    local transfer_user_data_128 = decode_u128(transfer, 81)
-                    if compare_u128(transfer_user_data_128, user_data_128) ~= 0 then
-                        matches = false
-                    end
+                local include = false
+                if include_debits and debit_account_id == account_id then
+                    include = true
+                end
+                if include_credits and credit_account_id == account_id then
+                    include = true
                 end
 
-                -- Filter by user_data_64
-                if matches and user_data_64 ~= 0 then
-                    local transfer_user_data_64 = decode_u64(transfer, 97)
-                    if transfer_user_data_64 ~= user_data_64 then
+                if include and timestamp >= timestamp_min and timestamp <= timestamp_max then
+                    local matches = true
+
+                    if filter_user_data_128_active and lb_slice16(transfer, 81) ~= user_data_128_filter then
                         matches = false
                     end
-                end
 
-                -- Filter by user_data_32
-                if matches and user_data_32 ~= 0 then
-                    local transfer_user_data_32 = decode_u32(transfer, 105)
-                    if transfer_user_data_32 ~= user_data_32 then
+                    if matches and user_data_64 ~= 0 and lb_decode_u64(transfer, 97) ~= user_data_64 then
                         matches = false
                     end
-                end
 
-                -- Filter by code
-                if matches and code_filter ~= 0 then
-                    local transfer_code = decode_u16(transfer, 117)
-                    if transfer_code ~= code_filter then
+                    if matches and user_data_32 ~= 0 and lb_decode_u32(transfer, 105) ~= user_data_32 then
                         matches = false
                     end
-                end
 
-                if matches then
-                    table.insert(candidates, {timestamp = timestamp, data = transfer})
+                    if matches and code_filter ~= 0 and lb_decode_u16(transfer, 117) ~= code_filter then
+                        matches = false
+                    end
+
+                    if matches then
+                        candidates[#candidates + 1] = {timestamp = timestamp, data = transfer}
+                    end
                 end
             end
         end
+
+        batch_ids = {}
+        batch_keys = {}
     end
 end
 
@@ -220,7 +153,7 @@ end)
 -- Apply limit and extract transfer data
 local results = {}
 for i = 1, math.min(limit, #candidates) do
-    table.insert(results, candidates[i].data)
+    results[#results + 1] = candidates[i].data
 end
 
 -- Return concatenated binary transfers

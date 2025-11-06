@@ -49,6 +49,12 @@ func setupTest() (*TestFixture, error) {
 		"getBalances":          "../scripts/get_account_balances.lua",
 	}
 
+	commonScript, err := os.ReadFile("../scripts/common.lua")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read common script: %w", err)
+	}
+	common := string(commonScript) + "\n"
+
 	loadedSHAs := make(map[string]string)
 	for name, path := range scripts {
 		content, err := os.ReadFile(path)
@@ -56,7 +62,7 @@ func setupTest() (*TestFixture, error) {
 			return nil, fmt.Errorf("failed to read %s: %w", path, err)
 		}
 
-		sha, err := client.ScriptLoad(ctx, string(content)).Result()
+		sha, err := client.ScriptLoad(ctx, common+string(content)).Result()
 		if err != nil {
 			return nil, fmt.Errorf("failed to load script %s: %w", path, err)
 		}

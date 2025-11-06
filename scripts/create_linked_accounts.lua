@@ -23,31 +23,21 @@ local data_len = #accounts_data
 
 -- Validate size is multiple of 128
 if data_len % 128 ~= 0 then
-    return string.char(32) .. string.rep('\0', 127) -- ERR_INVALID_DATA_SIZE = 32
+    return lb_result(32) -- ERR_INVALID_DATA_SIZE
 end
 
 local num_accounts = data_len / 128
 local results = {}
 local chain_start = nil
-local created_accounts = {}
 
 -- Get timestamp once for all accounts (will be used for non-imported accounts)
 -- TODO: EloqKV doesn't support TIME command in Lua scripts, using arbitrary timestamp
 -- local timestamp = redis.call('TIME')
 -- local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
-local ts = 1000000000000000000  -- Arbitrary timestamp for EloqKV compatibility
-local ts_bytes = string.char(
-    ts % 256,
-    math.floor(ts / 256) % 256,
-    math.floor(ts / 65536) % 256,
-    math.floor(ts / 16777216) % 256,
-    math.floor(ts / 4294967296) % 256,
-    math.floor(ts / 1099511627776) % 256,
-    math.floor(ts / 281474976710656) % 256,
-    math.floor(ts / 72057594037927936) % 256
-)
+local ts_bytes = lb_encode_u64(1000000000000000000)
 
 local IMPORTED_FLAG = 0x0100
+local FLAG_LINKED = 0x0001
 
 for i = 0, num_accounts - 1 do
     local offset = i * 128 + 1
@@ -56,8 +46,8 @@ for i = 0, num_accounts - 1 do
     -- Extract id and flags
     local id = string.sub(account_data, 1, 16)
     local flags = string.byte(account_data, 119) + string.byte(account_data, 120) * 256
-    local is_linked = (flags % 2) == 1  -- LINKED flag is 0x0001
-    local is_imported = (math.floor(flags / IMPORTED_FLAG) % 2) == 1
+    local is_linked = lb_has_flag(flags, FLAG_LINKED)
+    local is_imported = lb_has_flag(flags, IMPORTED_FLAG)
 
     local error_code = 0
     local key = "account:" .. id
@@ -85,16 +75,16 @@ for i = 0, num_accounts - 1 do
             -- Mark all accounts in chain as failed
             for j = chain_start, i do
                 if j == i then
-                    table.insert(results, string.char(error_code) .. string.rep('\0', 127))
+                    results[#results + 1] = lb_result(error_code)
                 else
-                    table.insert(results, string.char(1) .. string.rep('\0', 127)) -- ERR_LINKED_EVENT_FAILED
+                    results[#results + 1] = lb_result(1) -- ERR_LINKED_EVENT_FAILED
                 end
             end
 
             chain_start = nil
         else
             -- Single account failure
-            table.insert(results, string.char(error_code) .. string.rep('\0', 127))
+            results[#results + 1] = lb_result(error_code)
         end
     else
         -- Success - create account with timestamp
@@ -108,8 +98,7 @@ for i = 0, num_accounts - 1 do
         end
 
         redis.call('SET', key, account_with_ts)
-        table.insert(created_accounts, id)
-        table.insert(results, string.char(0) .. string.rep('\0', 127)) -- ERR_OK
+        results[#results + 1] = lb_result(0) -- ERR_OK
 
         -- End chain if this account is not linked
         if not is_linked and chain_start ~= nil then
@@ -129,7 +118,7 @@ if chain_start ~= nil then
 
     -- Mark all as failed
     for j = chain_start, num_accounts - 1 do
-        results[j + 1] = string.char(2) .. string.rep('\0', 127) -- ERR_LINKED_EVENT_CHAIN_OPEN
+        results[j + 1] = lb_result(2) -- ERR_LINKED_EVENT_CHAIN_OPEN
     end
 end
 

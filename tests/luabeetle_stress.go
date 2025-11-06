@@ -67,13 +67,19 @@ func (r *LuaBeetleStressTest) loadScripts(ctx context.Context) error {
 		"../scripts/get_account_balances.lua":  &r.getAccountBalancesSHA,
 	}
 
+	commonScript, err := os.ReadFile("../scripts/common.lua")
+	if err != nil {
+		return fmt.Errorf("failed to read common script: %w", err)
+	}
+	common := string(commonScript) + "\n"
+
 	for path, shaPtr := range scripts {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("failed to read %s: %w", path, err)
 		}
 
-		sha, err := r.client.ScriptLoad(ctx, string(content)).Result()
+		sha, err := r.client.ScriptLoad(ctx, common+string(content)).Result()
 		if err != nil {
 			return fmt.Errorf("failed to load script %s: %w", path, err)
 		}
