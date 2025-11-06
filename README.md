@@ -12,7 +12,7 @@ A Redis Lua implementation of TigerBeetle's core financial transaction APIs. Lua
 - ✅ **Linked Operations**: All-or-nothing atomic batches with rollback
 - ✅ **Account Filters**: Full TigerBeetle AccountFilter support (128-byte binary)
 - ✅ **Transfer Queries**: Get transfers with filtering, sorting, pagination
-- ✅ **Balance History**: Track balance snapshots (64-byte binary, HISTORY flag)
+- ✅ **Balance History**: Track balance snapshots (128-byte binary, HISTORY flag)
 
 ## Project Structure
 
@@ -101,11 +101,13 @@ go build -o stress_test main.go common.go luabeetle_stress.go tigerbeetle_stress
 [48:64]   credits_pending (uint128)
 [64:80]   credits_posted (uint128)
 [80:96]   user_data_128 (uint128)
-[96:112]  user_data_64/user_data_32 (uint64/uint32)
+[96:104]  user_data_64 (uint64)
+[104:108] user_data_32 (uint32)
+[108:112] reserved (uint32)
 [112:116] ledger (uint32)
 [116:118] code (uint16)
 [118:120] flags (uint16)
-[120:128] timestamp/reserved (uint64)
+[120:128] timestamp (uint64)
 ```
 
 **Account Flags:**
@@ -122,7 +124,9 @@ go build -o stress_test main.go common.go luabeetle_stress.go tigerbeetle_stress
 [48:64]   amount (uint128)
 [64:80]   pending_id (uint128) - for post/void operations
 [80:96]   user_data_128 (uint128)
-[96:112]  user_data_64/user_data_32 (uint64/uint32)
+[96:104]  user_data_64 (uint64)
+[104:108] user_data_32 (uint32)
+[108:112] timeout (uint32)
 [112:116] ledger (uint32)
 [116:118] code (uint16)
 [118:120] flags (uint16)
@@ -180,42 +184,37 @@ Both demonstrate:
 
 ### Error Codes
 
-**Note:** Error codes and names now match TigerBeetle's specification exactly. Results are returned in a `result` field (not `error`).
+**Note:** Error codes match the implementation in `tests/common.go` and Lua scripts.
 
-#### CreateAccountsResult
-
-| Code | Error Name | Description |
-|------|------------|-------------|
-| 0 | ok | Success |
-| 1 | linked_event_failed | Linked operation failed |
-| 6 | id_must_not_be_zero | Account ID must not be zero |
-| 8 | flags_are_mutually_exclusive | Conflicting flags set |
-| 9 | debits_pending_must_be_zero | Initial debits_pending must be zero |
-| 10 | debits_posted_must_be_zero | Initial debits_posted must be zero |
-| 11 | credits_pending_must_be_zero | Initial credits_pending must be zero |
-| 12 | credits_posted_must_be_zero | Initial credits_posted must be zero |
-| 13 | ledger_must_not_be_zero | Ledger must not be zero |
-| 14 | code_must_not_be_zero | Code must not be zero |
-| 21 | exists | Account already exists |
-
-#### CreateTransfersResult
+#### Common Errors
 
 | Code | Error Name | Description |
 |------|------------|-------------|
-| 0 | ok | Success |
-| 1 | linked_event_failed | Linked operation failed |
-| 5 | id_must_not_be_zero | Transfer ID must not be zero |
-| 12 | accounts_must_be_different | Debit and credit accounts are same |
-| 19 | ledger_must_not_be_zero | Ledger must not be zero |
-| 21 | debit_account_not_found | Debit account not found |
-| 22 | credit_account_not_found | Credit account not found |
-| 24 | transfer_must_have_the_same_ledger_as_accounts | Ledger mismatch |
-| 25 | pending_transfer_not_found | Pending transfer not found |
-| 46 | exists | Transfer already exists |
-| 54 | exceeds_credits | Transfer exceeds credit limit |
-| 55 | exceeds_debits | Transfer exceeds debit limit |
+| 0 | OK | Success |
+| 1 | LINKED_EVENT_CHAIN_OPEN | Linked flag used in non-batch operation |
 
-**For complete error code reference, see [TigerBeetle Documentation](https://docs.tigerbeetle.com/)**
+#### Account Errors
+
+| Code | Error Name | Description |
+|------|------------|-------------|
+| 21 | ID_ALREADY_EXISTS | Account with this ID already exists |
+
+#### Transfer Errors
+
+| Code | Error Name | Description |
+|------|------------|-------------|
+| 29 | EXISTS_WITH_DIFFERENT_FLAGS | Transfer exists with different flags |
+| 34 | PENDING_TRANSFER_NOT_FOUND | Referenced pending transfer not found |
+| 35 | PENDING_TRANSFER_ALREADY_POSTED | Pending transfer already posted |
+| 36 | PENDING_TRANSFER_ALREADY_VOIDED | Pending transfer already voided |
+| 38 | DEBIT_ACCOUNT_NOT_FOUND | Debit account does not exist |
+| 39 | CREDIT_ACCOUNT_NOT_FOUND | Credit account does not exist |
+| 40 | ACCOUNTS_MUST_BE_DIFFERENT | Debit and credit accounts are the same |
+| 42 | EXCEEDS_CREDITS | Transfer would exceed credit balance constraints |
+| 43 | EXCEEDS_DEBITS | Transfer would exceed debit balance constraints |
+| 52 | LEDGER_MUST_MATCH | Transfer ledger must match account ledgers |
+
+**For TigerBeetle's complete error code reference, see [TigerBeetle Documentation](https://docs.tigerbeetle.com/)**
 
 ## Advanced Usage
 

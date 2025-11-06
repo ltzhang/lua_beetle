@@ -14,15 +14,18 @@ import (
 
 const (
 	ErrOK                           = 0
+	ErrLinkedEventChainOpen         = 1
 	ErrIDAlreadyExists              = 21
-	ErrDebitAccountNotFound         = 38
-	ErrCreditAccountNotFound        = 39
-	ErrAccountsMustBeDifferent      = 40
+	ErrExistsWithDifferentFlags     = 29
 	ErrPendingTransferNotFound      = 34
 	ErrPendingTransferAlreadyPosted = 35
 	ErrPendingTransferAlreadyVoided = 36
+	ErrDebitAccountNotFound         = 38
+	ErrCreditAccountNotFound        = 39
+	ErrAccountsMustBeDifferent      = 40
 	ErrExceedsCredits               = 42
 	ErrExceedsDebits                = 43
+	ErrLedgerMustMatch              = 52
 )
 
 // ============================================================================
@@ -415,6 +418,7 @@ func DecodeAccount(data string) map[string]uint64 {
 		"ledger":          uint64(binary.LittleEndian.Uint32(buf[112:116])),
 		"code":            uint64(binary.LittleEndian.Uint16(buf[116:118])),
 		"flags":           uint64(binary.LittleEndian.Uint16(buf[118:120])),
+		"timestamp":       binary.LittleEndian.Uint64(buf[120:128]),
 	}
 }
 

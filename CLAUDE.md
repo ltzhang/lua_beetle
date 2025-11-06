@@ -25,11 +25,13 @@ Account (128 bytes):
   [48:64]   credits_pending (uint128)
   [64:80]   credits_posted (uint128)
   [80:96]   user_data_128 (uint128)
-  [96:112]  user_data_64/user_data_32 (uint64/uint32)
+  [96:104]  user_data_64 (uint64)
+  [104:108] user_data_32 (uint32)
+  [108:112] reserved (uint32)
   [112:116] ledger (uint32)
   [116:118] code (uint16)
   [118:120] flags (uint16)
-  [120:128] timestamp/reserved (uint64)
+  [120:128] timestamp (uint64)
 
 Transfer (128 bytes):
   [0:16]    ID (uint128)
@@ -38,7 +40,9 @@ Transfer (128 bytes):
   [48:64]   amount (uint128)
   [64:80]   pending_id (uint128) - for post/void operations
   [80:96]   user_data_128 (uint128)
-  [96:112]  user_data_64/user_data_32 (uint64/uint32)
+  [96:104]  user_data_64 (uint64)
+  [104:108] user_data_32 (uint32)
+  [108:112] timeout (uint32)
   [112:116] ledger (uint32)
   [116:118] code (uint16)
   [118:120] flags (uint16)
