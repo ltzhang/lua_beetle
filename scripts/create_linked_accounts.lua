@@ -21,9 +21,33 @@
 local accounts_data = ARGV[1]
 local data_len = #accounts_data
 
+local ERR_INVALID_DATA_SIZE = 32
+local ERR_LINKED_EVENT_FAILED = 1
+local ERR_LINKED_EVENT_CHAIN_OPEN = 2
+local ERR_IMPORTED_EVENT_TIMESTAMP_OUT_OF_RANGE = 24
+local ERR_TIMESTAMP_MUST_BE_ZERO = 3
+local ERR_RESERVED_FIELD = 4
+local ERR_RESERVED_FLAG = 5
+local ERR_ID_MUST_NOT_BE_ZERO = 6
+local ERR_ID_MUST_NOT_BE_INT_MAX = 7
+local ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE = 8
+local ERR_DEBITS_PENDING_MUST_BE_ZERO = 9
+local ERR_DEBITS_POSTED_MUST_BE_ZERO = 10
+local ERR_CREDITS_PENDING_MUST_BE_ZERO = 11
+local ERR_CREDITS_POSTED_MUST_BE_ZERO = 12
+local ERR_LEDGER_MUST_NOT_BE_ZERO = 13
+local ERR_CODE_MUST_NOT_BE_ZERO = 14
+local ERR_EXISTS_WITH_DIFFERENT_FLAGS = 15
+local ERR_EXISTS_WITH_DIFFERENT_USER_DATA_128 = 16
+local ERR_EXISTS_WITH_DIFFERENT_USER_DATA_64 = 17
+local ERR_EXISTS_WITH_DIFFERENT_USER_DATA_32 = 18
+local ERR_EXISTS_WITH_DIFFERENT_LEDGER = 19
+local ERR_EXISTS_WITH_DIFFERENT_CODE = 20
+local ERR_EXISTS = 21
+
 -- Validate size is multiple of 128
 if data_len % 128 ~= 0 then
-    return lb_result(32) -- ERR_INVALID_DATA_SIZE
+    return lb_result(ERR_INVALID_DATA_SIZE)
 end
 
 local num_accounts = data_len / 128
@@ -31,13 +55,14 @@ local results = {}
 local chain_start = nil
 
 -- Get timestamp once for all accounts (will be used for non-imported accounts)
--- TODO: EloqKV doesn't support TIME command in Lua scripts, using arbitrary timestamp
--- local timestamp = redis.call('TIME')
--- local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
-local ts_bytes = lb_encode_u64(1000000000000000000)
+local timestamp = redis.call('TIME')
+local ts_bytes = lb_encode_u64(tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000)
 
-local IMPORTED_FLAG = 0x0100
+local IMPORTED_FLAG = 0x0010
 local FLAG_LINKED = 0x0001
+local FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 0x0002
+local FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 0x0004
+local ACCOUNT_FLAGS_MASK = 0x003f
 
 for i = 0, num_accounts - 1 do
     local offset = i * 128 + 1
@@ -57,9 +82,60 @@ for i = 0, num_accounts - 1 do
         chain_start = i
     end
 
-    -- Check if account exists
-    if redis.call('EXISTS', key) == 1 then
-        error_code = 21 -- ERR_EXISTS
+    if flags > ACCOUNT_FLAGS_MASK then
+        error_code = ERR_RESERVED_FLAG
+    elseif id == lb_zero_16 then
+        error_code = ERR_ID_MUST_NOT_BE_ZERO
+    elseif id == string.rep('\255', 16) then
+        error_code = ERR_ID_MUST_NOT_BE_INT_MAX
+    elseif not lb_all_zero(account_data, 17, 16) then
+        error_code = ERR_DEBITS_PENDING_MUST_BE_ZERO
+    elseif not lb_all_zero(account_data, 33, 16) then
+        error_code = ERR_DEBITS_POSTED_MUST_BE_ZERO
+    elseif not lb_all_zero(account_data, 49, 16) then
+        error_code = ERR_CREDITS_PENDING_MUST_BE_ZERO
+    elseif not lb_all_zero(account_data, 65, 16) then
+        error_code = ERR_CREDITS_POSTED_MUST_BE_ZERO
+    elseif not lb_all_zero(account_data, 109, 4) then
+        error_code = ERR_RESERVED_FIELD
+    elseif lb_decode_u32(account_data, 113) == 0 then
+        error_code = ERR_LEDGER_MUST_NOT_BE_ZERO
+    elseif lb_decode_u16(account_data, 117) == 0 then
+        error_code = ERR_CODE_MUST_NOT_BE_ZERO
+    elseif lb_has_flag(flags, FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS) and
+           lb_has_flag(flags, FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS) then
+        error_code = ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE
+    else
+        local client_timestamp = lb_decode_u64(account_data, 121)
+        if is_imported then
+            -- Imported-event ordering semantics are not implemented in lua_beetle.
+            error_code = ERR_RESERVED_FLAG
+        elseif client_timestamp ~= 0 then
+            error_code = ERR_TIMESTAMP_MUST_BE_ZERO
+        end
+    end
+
+    local existing = nil
+    if error_code == 0 then
+        existing = redis.call('GET', key)
+        if existing and #existing == 128 then
+            local existing_flags = lb_decode_u16(existing, 119)
+            if existing_flags ~= flags then
+                error_code = ERR_EXISTS_WITH_DIFFERENT_FLAGS
+            elseif string.sub(existing, 81, 96) ~= string.sub(account_data, 81, 96) then
+                error_code = ERR_EXISTS_WITH_DIFFERENT_USER_DATA_128
+            elseif lb_decode_u64(existing, 97) ~= lb_decode_u64(account_data, 97) then
+                error_code = ERR_EXISTS_WITH_DIFFERENT_USER_DATA_64
+            elseif lb_decode_u32(existing, 105) ~= lb_decode_u32(account_data, 105) then
+                error_code = ERR_EXISTS_WITH_DIFFERENT_USER_DATA_32
+            elseif lb_decode_u32(existing, 113) ~= lb_decode_u32(account_data, 113) then
+                error_code = ERR_EXISTS_WITH_DIFFERENT_LEDGER
+            elseif lb_decode_u16(existing, 117) ~= lb_decode_u16(account_data, 117) then
+                error_code = ERR_EXISTS_WITH_DIFFERENT_CODE
+            else
+                error_code = ERR_EXISTS
+            end
+        end
     end
 
     -- If error occurred, handle rollback for linked chains
@@ -77,7 +153,7 @@ for i = 0, num_accounts - 1 do
                 if j == i then
                     results[#results + 1] = lb_result(error_code)
                 else
-                    results[#results + 1] = lb_result(1) -- ERR_LINKED_EVENT_FAILED
+                    results[#results + 1] = lb_result(ERR_LINKED_EVENT_FAILED)
                 end
             end
 
@@ -90,7 +166,6 @@ for i = 0, num_accounts - 1 do
         -- Success - create account with timestamp
         local account_with_ts
         if is_imported then
-            -- Use client-provided timestamp (must be non-zero)
             account_with_ts = account_data
         else
             -- Server sets timestamp
@@ -118,7 +193,11 @@ if chain_start ~= nil then
 
     -- Mark all as failed
     for j = chain_start, num_accounts - 1 do
-        results[j + 1] = lb_result(2) -- ERR_LINKED_EVENT_CHAIN_OPEN
+        if j == num_accounts - 1 then
+            results[j + 1] = lb_result(ERR_LINKED_EVENT_CHAIN_OPEN)
+        else
+            results[j + 1] = lb_result(ERR_LINKED_EVENT_FAILED)
+        end
     end
 end
 

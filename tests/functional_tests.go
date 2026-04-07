@@ -419,7 +419,7 @@ func testGetAccountBalances(f *TestFixture) error {
 	f.createTransfer("balance_tx_1", 200, 201, 150, 700, 10, 0)
 
 	// Query balance history
-	filter := f.encoder.EncodeAccountFilter(200, 0, ^uint64(0), 10, 0)
+	filter := f.encoder.EncodeAccountFilter(200, 0, ^uint64(0), 10, FilterDebits|FilterCredits)
 	result, err := f.client.EvalSha(f.ctx, f.getBalancesSHA, []string{}, string(filter)).Result()
 	if err != nil {
 		return fmt.Errorf("get balances failed: %w", err)
@@ -432,15 +432,15 @@ func testGetAccountBalances(f *TestFixture) error {
 	}
 
 	// Verify balances increase
-	balance1 := binary.LittleEndian.Uint64([]byte(balancesBlob)[24:32])  // First snapshot debits_posted
-	balance2 := binary.LittleEndian.Uint64([]byte(balancesBlob)[128+24 : 128+32])  // Second snapshot
+	balance1 := binary.LittleEndian.Uint64([]byte(balancesBlob)[16:24])  // First snapshot debits_posted
+	balance2 := binary.LittleEndian.Uint64([]byte(balancesBlob)[128+16 : 128+24])  // Second snapshot
 
 	if balance1 != 150 || balance2 != 300 {
 		return fmt.Errorf("balances should increase (150, 300): got %d, %d", balance1, balance2)
 	}
 
 	// Test account without HISTORY flag
-	filter = f.encoder.EncodeAccountFilter(201, 0, ^uint64(0), 10, 0)
+	filter = f.encoder.EncodeAccountFilter(201, 0, ^uint64(0), 10, FilterDebits|FilterCredits)
 	result, _ = f.client.EvalSha(f.ctx, f.getBalancesSHA, []string{}, string(filter)).Result()
 
 	balancesBlob = result.(string)

@@ -9,13 +9,12 @@
 --   [16:32]   user_data_128 (uint128, filter - 0 = match all)
 --   [32:40]   user_data_64 (uint64, filter - 0 = match all)
 --   [40:44]   user_data_32 (uint32, filter - 0 = match all)
---   [44:46]   reserved (uint16, must be 0)
---   [46:48]   code (uint16, filter - 0 = match all)
---   [48:56]   timestamp_min (uint64, inclusive)
---   [56:64]   timestamp_max (uint64, inclusive)
---   [64:68]   limit (uint32)
---   [68:72]   flags (uint32): debits=0x01, credits=0x02, reversed=0x04
---   [72:128]  reserved (56 bytes, must be 0)
+--   [44:46]   code (uint16, filter - 0 = match all)
+--   [46:104]  reserved (58 bytes, must be 0)
+--   [104:112] timestamp_min (uint64, inclusive)
+--   [112:120] timestamp_max (uint64, inclusive)
+--   [120:124] limit (uint32)
+--   [124:128] flags (uint32): debits=0x01, credits=0x02, reversed=0x04)
 
 local filter_data = ARGV[1]
 
@@ -29,11 +28,11 @@ local account_id = string.sub(filter_data, 1, 16)
 local user_data_128_filter = string.sub(filter_data, 17, 32)
 local user_data_64 = lb_decode_u64(filter_data, 33)
 local user_data_32 = lb_decode_u32(filter_data, 41)
-local code_filter = lb_decode_u16(filter_data, 47)
-local timestamp_min = lb_decode_u64(filter_data, 49)
-local timestamp_max = lb_decode_u64(filter_data, 57)
-local limit = lb_decode_u32(filter_data, 65)
-local flags = lb_decode_u32(filter_data, 69)
+local code_filter = lb_decode_u16(filter_data, 45)
+local timestamp_min = lb_decode_u64(filter_data, 105)
+local timestamp_max = lb_decode_u64(filter_data, 113)
+local limit = lb_decode_u32(filter_data, 121)
+local flags = lb_decode_u32(filter_data, 125)
 
 -- Parse flags
 local FLAG_DEBITS = 0x01
@@ -44,52 +43,58 @@ local include_debits = lb_has_flag(flags, FLAG_DEBITS)
 local include_credits = lb_has_flag(flags, FLAG_CREDITS)
 local reversed = lb_has_flag(flags, FLAG_REVERSED)
 
--- If neither debits nor credits specified, include both
-if not include_debits and not include_credits then
-    include_debits = true
-    include_credits = true
-end
-
 local filter_user_data_128_active = user_data_128_filter ~= lb_zero_16
 
--- Validate limit
+-- TigerBeetle treats invalid filters as empty results.
+if account_id == lb_zero_16 or account_id == string.rep('\255', 16) then
+    return ""
+end
+
 if limit == 0 then
     return "" -- Invalid limit
 end
 
+if not include_debits and not include_credits then
+    return ""
+end
+
+if not lb_all_zero(filter_data, 47, 58) then
+    return ""
+end
+
+if timestamp_max ~= 0 and timestamp_min > timestamp_max then
+    return ""
+end
+
 -- Set timestamp_max to max value if not specified
-if timestamp_max == 0 or timestamp_max >= (2^63) then
+if timestamp_max == 0 then
     timestamp_max = 2^63 - 1
 end
 
--- Get transfer index (string of concatenated 16-byte transfer IDs)
--- Use binary account_id for key (same as create_transfer.lua)
+-- Get transfer index from sorted set.
+-- Member is lowercase 32-char hex transfer id, score is timestamp in microseconds.
 local index_key = "account:" .. account_id .. ":transfers"
-local transfer_ids_blob = redis.call('GET', index_key)
-
-if not transfer_ids_blob or #transfer_ids_blob == 0 then
-    return "" -- No transfers found
+local range_result
+local min_score = timestamp_min == 0 and "-inf" or tostring(math.floor(timestamp_min / 1000))
+local max_score = timestamp_max == 0 and "+inf" or tostring(math.floor(timestamp_max / 1000))
+if reversed then
+    range_result = redis.call('ZREVRANGEBYSCORE', index_key, max_score, min_score, 'LIMIT', 0, limit)
+else
+    range_result = redis.call('ZRANGEBYSCORE', index_key, min_score, max_score, 'LIMIT', 0, limit)
 end
 
--- Each transfer ID is 16 bytes
-local num_transfers = #transfer_ids_blob / 16
-local transfer_ids = {}
-for i = 1, num_transfers do
-    local offset = (i - 1) * 16 + 1
-    transfer_ids[i] = string.sub(transfer_ids_blob, offset, offset + 15)
+if not range_result or #range_result == 0 then
+    return "" -- No transfers found
 end
 
 local candidates = {}
 local batch_keys = {}
-local batch_ids = {}
 local BATCH_SIZE = 64
 
-for i = 1, num_transfers do
-    local raw_id = transfer_ids[i]
-    batch_ids[#batch_ids + 1] = raw_id
-    batch_keys[#batch_keys + 1] = "transfer:" .. lb_hex16(raw_id)
+for i = 1, #range_result do
+    batch_keys[#batch_keys + 1] = "transfer:" .. range_result[i]
 
-    if #batch_keys == BATCH_SIZE or i == num_transfers then
+    if #batch_keys == BATCH_SIZE or i == #range_result then
         local fetched = redis.call('MGET', unpack(batch_keys))
         for j = 1, #fetched do
             local transfer = fetched[j]
@@ -121,9 +126,9 @@ for i = 1, num_transfers do
                         matches = false
                     end
 
-                    if matches and code_filter ~= 0 and lb_decode_u16(transfer, 117) ~= code_filter then
-                        matches = false
-                    end
+                        if matches and code_filter ~= 0 and lb_decode_u16(transfer, 117) ~= code_filter then
+                            matches = false
+                        end
 
                     if matches then
                         candidates[#candidates + 1] = {timestamp = timestamp, data = transfer}
@@ -132,7 +137,6 @@ for i = 1, num_transfers do
             end
         end
 
-        batch_ids = {}
         batch_keys = {}
     end
 end
@@ -141,16 +145,6 @@ if #candidates == 0 then
     return "" -- No matching transfers
 end
 
--- Sort by timestamp (at query time)
-table.sort(candidates, function(a, b)
-    if reversed then
-        return a.timestamp > b.timestamp
-    else
-        return a.timestamp < b.timestamp
-    end
-end)
-
--- Apply limit and extract transfer data
 local results = {}
 for i = 1, math.min(limit, #candidates) do
     results[#results + 1] = candidates[i].data

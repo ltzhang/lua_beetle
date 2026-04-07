@@ -4,6 +4,7 @@
 
 local lb_zero_padding = string.rep('\0', 127)
 local lb_zero_16 = string.rep('\0', 16)
+local lb_ff_16 = string.rep('\255', 16)
 local lb_result_cache = {}
 
 function lb_result(code)
@@ -41,6 +42,23 @@ end
 
 function lb_slice16(data, offset)
     return string.sub(data, offset, offset + 15)
+end
+
+function lb_all_zero(data, offset, length)
+    for i = offset, offset + length - 1 do
+        if string.byte(data, i) ~= 0 then
+            return false
+        end
+    end
+    return true
+end
+
+function lb_is_zero_16(data, offset)
+    return string.sub(data, offset, offset + 15) == lb_zero_16
+end
+
+function lb_is_max_16(data, offset)
+    return string.sub(data, offset, offset + 15) == lb_ff_16
 end
 
 function lb_encode_u64(value)

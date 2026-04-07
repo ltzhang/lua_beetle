@@ -9,20 +9,19 @@
 --   [16:32]   user_data_128 (uint128, filter - 0 = match all)
 --   [32:40]   user_data_64 (uint64, filter - 0 = match all)
 --   [40:44]   user_data_32 (uint32, filter - 0 = match all)
---   [44:46]   reserved (uint16, must be 0)
---   [46:48]   code (uint16, filter - 0 = match all)
---   [48:56]   timestamp_min (uint64, inclusive)
---   [56:64]   timestamp_max (uint64, inclusive)
---   [64:68]   limit (uint32)
---   [68:72]   flags (uint32): debits=0x01, credits=0x02, reversed=0x04
---   [72:128]  reserved (56 bytes, must be 0)
+--   [44:46]   code (uint16, filter - 0 = match all)
+--   [46:104]  reserved (58 bytes, must be 0)
+--   [104:112] timestamp_min (uint64, inclusive)
+--   [112:120] timestamp_max (uint64, inclusive)
+--   [120:124] limit (uint32)
+--   [124:128] flags (uint32): debits=0x01, credits=0x02, reversed=0x04
 --
 -- AccountBalance layout (128 bytes):
---   [0:8]     timestamp (uint64)
---   [8:24]    debits_pending (uint128)
---   [24:40]   debits_posted (uint128)
---   [40:56]   credits_pending (uint128)
---   [56:72]   credits_posted (uint128)
+--   [0:16]    debits_pending (uint128)
+--   [16:32]   debits_posted (uint128)
+--   [32:48]   credits_pending (uint128)
+--   [48:64]   credits_posted (uint128)
+--   [64:72]   timestamp (uint64)
 --   [72:128]  reserved (56 bytes, must be 0)
 
 local filter_data = ARGV[1]
@@ -34,22 +33,37 @@ end
 
 -- Parse AccountFilter
 local account_id = string.sub(filter_data, 1, 16)
-local timestamp_min = lb_decode_u64(filter_data, 49)
-local timestamp_max = lb_decode_u64(filter_data, 57)
-local limit = lb_decode_u32(filter_data, 65)
-local flags = lb_decode_u32(filter_data, 69)
+local timestamp_min = lb_decode_u64(filter_data, 105)
+local timestamp_max = lb_decode_u64(filter_data, 113)
+local limit = lb_decode_u32(filter_data, 121)
+local flags = lb_decode_u32(filter_data, 125)
 
 -- Parse flags
 local FLAG_REVERSED = 0x04
 local reversed = (math.floor(flags / FLAG_REVERSED) % 2) == 1
 
--- Validate limit
+if account_id == lb_zero_16 or account_id == string.rep('\255', 16) then
+    return ""
+end
+
 if limit == 0 then
     return "" -- Invalid limit
 end
 
+if not lb_has_flag(flags, 0x01) and not lb_has_flag(flags, 0x02) then
+    return ""
+end
+
+if not lb_all_zero(filter_data, 47, 58) then
+    return ""
+end
+
+if timestamp_max ~= 0 and timestamp_min > timestamp_max then
+    return ""
+end
+
 -- Set timestamp_max to max value if not specified
-if timestamp_max == 0 or timestamp_max >= (2^63) then
+if timestamp_max == 0 then
     timestamp_max = 2^63 - 1
 end
 
@@ -75,23 +89,19 @@ if not has_history then
     return "" -- Account doesn't have history flag set
 end
 
--- Get balance history index (string of concatenated 128-byte balance snapshots)
--- Use binary account_id for key (same as create_transfer.lua)
+-- Get balance history list.
 local index_key = "account:" .. account_id .. ":balance_history"
-local balance_blob = redis.call('GET', index_key)
+local balance_entries = redis.call('LRANGE', index_key, 0, -1)
 
-if not balance_blob or #balance_blob == 0 then
+if not balance_entries or #balance_entries == 0 then
     return "" -- No balance history found
 end
 
--- Each balance snapshot is 128 bytes
-local num_balances = #balance_blob / 128
-
 -- Filter and collect balances
 local candidates = {}
-for i = 0, num_balances - 1 do
-    local balance_data = string.sub(balance_blob, i * 128 + 1, i * 128 + 128)
-    local timestamp = lb_decode_u64(balance_data, 1)
+for i = 1, #balance_entries do
+    local balance_data = balance_entries[i]
+    local timestamp = lb_decode_u64(balance_data, 65)
 
     -- Apply timestamp filter
     if timestamp >= timestamp_min and timestamp <= timestamp_max then

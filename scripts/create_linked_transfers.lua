@@ -21,9 +21,35 @@
 local transfers_data = ARGV[1]
 local data_len = #transfers_data
 
+local ERR_INVALID_DATA_SIZE = 32
+local ERR_LINKED_EVENT_FAILED = 1
+local ERR_LINKED_EVENT_CHAIN_OPEN = 2
+local ERR_RESERVED_FLAG = 4
+local ERR_EXISTS = 46
+local ERR_DEBIT_ACCOUNT_NOT_FOUND = 21
+local ERR_CREDIT_ACCOUNT_NOT_FOUND = 22
+local ERR_ACCOUNTS_MUST_BE_DIFFERENT = 12
+local ERR_ACCOUNTS_MUST_HAVE_THE_SAME_LEDGER = 23
+local ERR_TRANSFER_MUST_HAVE_THE_SAME_LEDGER_AS_ACCOUNTS = 24
+local ERR_PENDING_ID_MUST_NOT_BE_ZERO = 14
+local ERR_PENDING_TRANSFER_NOT_FOUND = 25
+local ERR_PENDING_TRANSFER_NOT_PENDING = 26
+local ERR_PENDING_TRANSFER_HAS_DIFFERENT_DEBIT_ACCOUNT_ID = 27
+local ERR_PENDING_TRANSFER_HAS_DIFFERENT_CREDIT_ACCOUNT_ID = 28
+local ERR_PENDING_TRANSFER_HAS_DIFFERENT_LEDGER = 29
+local ERR_PENDING_TRANSFER_HAS_DIFFERENT_CODE = 30
+local ERR_PENDING_TRANSFER_ALREADY_POSTED = 33
+local ERR_PENDING_TRANSFER_ALREADY_VOIDED = 34
+local ERR_OVERFLOWS_DEBITS_PENDING = 47
+local ERR_OVERFLOWS_CREDITS_PENDING = 48
+local ERR_OVERFLOWS_DEBITS_POSTED = 49
+local ERR_OVERFLOWS_CREDITS_POSTED = 50
+local ERR_EXCEEDS_CREDITS = 54
+local ERR_EXCEEDS_DEBITS = 55
+
 -- Validate size is multiple of 128
 if data_len % 128 ~= 0 then
-    return lb_result(32) -- ERR_INVALID_DATA_SIZE
+    return lb_result(ERR_INVALID_DATA_SIZE)
 end
 
 local num_transfers = data_len / 128
@@ -31,19 +57,22 @@ local num_transfers = data_len / 128
 local ZERO_ID = lb_zero_16
 
 -- Get timestamp once (for non-imported transfers)
--- TODO: EloqKV doesn't support TIME command in Lua scripts, using arbitrary timestamp
--- local timestamp = redis.call('TIME')
--- local ts = tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000
-local ts_bytes = lb_encode_u64(1000000000000000000)
+local timestamp = redis.call('TIME')
+local ts_bytes = lb_encode_u64(tonumber(timestamp[1]) * 1000000000 + tonumber(timestamp[2]) * 1000)
 
 local results = {}
 local chain_start = nil
 local modified_accounts = {}
 local index_original_lengths = {} -- Track original lengths for rollback
+local added_transfer_members = {}
 
 local FLAG_PENDING = 0x0002
 local FLAG_POST_PENDING = 0x0004
 local FLAG_VOID_PENDING = 0x0008
+local FLAG_BALANCING_DEBIT = 0x0010
+local FLAG_BALANCING_CREDIT = 0x0020
+local FLAG_CLOSING_DEBIT = 0x0040
+local FLAG_CLOSING_CREDIT = 0x0080
 local FLAG_IMPORTED = 0x0100
 local ACCOUNT_FLAG_DEBITS_MUST_NOT_EXCEED_CREDITS = 0x0002
 local ACCOUNT_FLAG_CREDITS_MUST_NOT_EXCEED_DEBITS = 0x0004
@@ -70,6 +99,19 @@ for i = 0, num_transfers - 1 do
 
     local error_code = 0
 
+    if is_imported then
+        -- Imported-event semantics are not implemented in lua_beetle.
+        error_code = ERR_RESERVED_FLAG
+    end
+
+    if error_code == 0 and (
+        lb_has_flag(flags, FLAG_BALANCING_DEBIT) or
+        lb_has_flag(flags, FLAG_BALANCING_CREDIT) or
+        lb_has_flag(flags, FLAG_CLOSING_DEBIT) or
+        lb_has_flag(flags, FLAG_CLOSING_CREDIT)) then
+        error_code = ERR_RESERVED_FLAG
+    end
+
     -- Start chain tracking
     if chain_start == nil and is_linked then
         chain_start = i
@@ -77,14 +119,14 @@ for i = 0, num_transfers - 1 do
 
     -- Validate accounts are different
     if debit_account_id == credit_account_id then
-        error_code = 40 -- ERR_ACCOUNTS_MUST_BE_DIFFERENT
+        error_code = ERR_ACCOUNTS_MUST_BE_DIFFERENT
     end
 
     -- Check if transfer exists
     if error_code == 0 then
         local transfer_key = "transfer:" .. transfer_id_hex
         if redis.call('EXISTS', transfer_key) == 1 then
-            error_code = 29 -- ERR_EXISTS_WITH_DIFFERENT_FLAGS
+            error_code = ERR_EXISTS
         end
     end
 
@@ -98,9 +140,9 @@ for i = 0, num_transfers - 1 do
         credit_account = redis.call('GET', credit_key)
 
         if not debit_account or #debit_account ~= 128 then
-            error_code = 38 -- ERR_DEBIT_ACCOUNT_NOT_FOUND
+            error_code = ERR_DEBIT_ACCOUNT_NOT_FOUND
         elseif not credit_account or #credit_account ~= 128 then
-            error_code = 39 -- ERR_CREDIT_ACCOUNT_NOT_FOUND
+            error_code = ERR_CREDIT_ACCOUNT_NOT_FOUND
         end
     end
 
@@ -108,12 +150,14 @@ for i = 0, num_transfers - 1 do
     local new_debit_account, new_credit_account
     if error_code == 0 then
         -- Check ledgers match
-        local transfer_ledger = string.sub(transfer_data, 113, 116)
-        local debit_ledger = string.sub(debit_account, 113, 116)
-        local credit_ledger = string.sub(credit_account, 113, 116)
+        local transfer_ledger = lb_decode_u32(transfer_data, 113)
+        local debit_ledger = lb_decode_u32(debit_account, 113)
+        local credit_ledger = lb_decode_u32(credit_account, 113)
 
-        if transfer_ledger ~= debit_ledger or transfer_ledger ~= credit_ledger then
-            error_code = 52 -- ERR_LEDGER_MUST_MATCH
+        if debit_ledger ~= credit_ledger then
+            error_code = ERR_ACCOUNTS_MUST_HAVE_THE_SAME_LEDGER
+        elseif transfer_ledger ~= debit_ledger then
+            error_code = ERR_TRANSFER_MUST_HAVE_THE_SAME_LEDGER_AS_ACCOUNTS
         else
             new_debit_account = debit_account
             new_credit_account = credit_account
@@ -123,39 +167,47 @@ for i = 0, num_transfers - 1 do
 
             if is_post or is_void then
                 if pending_id_raw == ZERO_ID then
-                    error_code = 33 -- ERR_PENDING_ID_REQUIRED
+                    error_code = ERR_PENDING_ID_MUST_NOT_BE_ZERO
                 else
                     local pending_transfer_key = "transfer:" .. pending_id_hex
                     local pending_transfer = redis.call('GET', pending_transfer_key)
                     if not pending_transfer or #pending_transfer ~= 128 then
-                        error_code = 34 -- ERR_PENDING_TRANSFER_NOT_FOUND
+                        error_code = ERR_PENDING_TRANSFER_NOT_FOUND
                     else
                         local pending_flags = string.byte(pending_transfer, 119) + string.byte(pending_transfer, 120) * 256
                         if not lb_has_flag(pending_flags, FLAG_PENDING) then
-                            error_code = 35 -- ERR_PENDING_TRANSFER_ALREADY_POSTED
+                            error_code = ERR_PENDING_TRANSFER_NOT_PENDING
                         else
                             local pending_debit_id = lb_slice16(pending_transfer, 17)
                             local pending_credit_id = lb_slice16(pending_transfer, 33)
                             local pending_amount_bytes = lb_slice16(pending_transfer, 49)
 
-                            if pending_debit_id ~= debit_account_id or pending_credit_id ~= credit_account_id or pending_amount_bytes ~= amount_bytes then
-                                error_code = 34
+                            if pending_debit_id ~= debit_account_id then
+                                error_code = ERR_PENDING_TRANSFER_HAS_DIFFERENT_DEBIT_ACCOUNT_ID
+                            elseif pending_credit_id ~= credit_account_id then
+                                error_code = ERR_PENDING_TRANSFER_HAS_DIFFERENT_CREDIT_ACCOUNT_ID
+                            elseif lb_decode_u32(pending_transfer, 113) ~= transfer_ledger then
+                                error_code = ERR_PENDING_TRANSFER_HAS_DIFFERENT_LEDGER
+                            elseif lb_decode_u16(pending_transfer, 117) ~= lb_decode_u16(transfer_data, 117) then
+                                error_code = ERR_PENDING_TRANSFER_HAS_DIFFERENT_CODE
+                            elseif pending_amount_bytes ~= amount_bytes then
+                                error_code = is_void and 32 or ERR_PENDING_TRANSFER_NOT_FOUND
                             elseif is_post then
                                 local debit_pending = lb_sub_field(debit_account, 17, pending_amount_bytes)
                                 if not debit_pending then
-                                    error_code = 35
+                                    error_code = ERR_PENDING_TRANSFER_ALREADY_POSTED
                                 else
                                     local credit_pending = lb_sub_field(credit_account, 49, pending_amount_bytes)
                                     if not credit_pending then
-                                        error_code = 35
+                                        error_code = ERR_PENDING_TRANSFER_ALREADY_POSTED
                                     else
                                         local debit_posted = lb_add_field(debit_account, 33, pending_amount_bytes)
                                         if not debit_posted then
-                                            error_code = 42
+                                            error_code = ERR_OVERFLOWS_DEBITS_POSTED
                                         else
                                             local credit_posted = lb_add_field(credit_account, 65, pending_amount_bytes)
                                             if not credit_posted then
-                                                error_code = 43
+                                                error_code = ERR_OVERFLOWS_CREDITS_POSTED
                                             else
                                                 new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. debit_posted .. string.sub(debit_account, 49, 128)
                                                 new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. credit_posted .. string.sub(credit_account, 81, 128)
@@ -166,11 +218,11 @@ for i = 0, num_transfers - 1 do
                             else
                                 local debit_pending = lb_sub_field(debit_account, 17, pending_amount_bytes)
                                 if not debit_pending then
-                                    error_code = 36 -- ERR_PENDING_TRANSFER_ALREADY_VOIDED
+                                    error_code = ERR_PENDING_TRANSFER_ALREADY_VOIDED
                                 else
                                     local credit_pending = lb_sub_field(credit_account, 49, pending_amount_bytes)
                                     if not credit_pending then
-                                        error_code = 36
+                                        error_code = ERR_PENDING_TRANSFER_ALREADY_VOIDED
                                     else
                                         new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. string.sub(debit_account, 33, 128)
                                         new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
@@ -183,11 +235,11 @@ for i = 0, num_transfers - 1 do
             elseif is_pending then
                 local debit_pending = lb_add_field(debit_account, 17, amount_bytes)
                 if not debit_pending then
-                    error_code = 42
+                    error_code = ERR_OVERFLOWS_DEBITS_PENDING
                 else
                     local credit_pending = lb_add_field(credit_account, 49, amount_bytes)
                     if not credit_pending then
-                        error_code = 43
+                        error_code = ERR_OVERFLOWS_CREDITS_PENDING
                     else
                         new_debit_account = string.sub(debit_account, 1, 16) .. debit_pending .. string.sub(debit_account, 33, 128)
                         new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
@@ -196,11 +248,11 @@ for i = 0, num_transfers - 1 do
             else
                 local debit_posted = lb_add_field(debit_account, 33, amount_bytes)
                 if not debit_posted then
-                    error_code = 42
+                    error_code = ERR_OVERFLOWS_DEBITS_POSTED
                 else
                     local credit_posted = lb_add_field(credit_account, 65, amount_bytes)
                     if not credit_posted then
-                        error_code = 43
+                        error_code = ERR_OVERFLOWS_CREDITS_POSTED
                     else
                         new_debit_account = string.sub(debit_account, 1, 32) .. debit_posted .. string.sub(debit_account, 49, 128)
                         new_credit_account = string.sub(credit_account, 1, 64) .. credit_posted .. string.sub(credit_account, 81, 128)
@@ -217,15 +269,15 @@ for i = 0, num_transfers - 1 do
                     local debit_pending_bytes = lb_slice16(new_debit_account, 17)
                     local debit_total, debit_overflow = lb_add_u128(debit_posted_bytes, debit_pending_bytes)
                     if debit_overflow ~= 0 then
-                        error_code = 42
+                        error_code = ERR_EXCEEDS_CREDITS
                     else
                         local credit_posted_bytes = lb_slice16(new_debit_account, 65)
                         local credit_pending_bytes = lb_slice16(new_debit_account, 49)
                         local credit_total, credit_overflow = lb_add_u128(credit_posted_bytes, credit_pending_bytes)
                         if credit_overflow ~= 0 then
-                            error_code = 43
+                            error_code = ERR_EXCEEDS_DEBITS
                         elseif lb_compare_u128(debit_total, credit_total) == 1 then
-                            error_code = 42
+                            error_code = ERR_EXCEEDS_CREDITS
                         end
                     end
                 end
@@ -235,15 +287,15 @@ for i = 0, num_transfers - 1 do
                     local credit_pending_bytes = lb_slice16(new_credit_account, 49)
                     local credit_total, credit_overflow = lb_add_u128(credit_posted_bytes, credit_pending_bytes)
                     if credit_overflow ~= 0 then
-                        error_code = 43
+                        error_code = ERR_EXCEEDS_DEBITS
                     else
                         local debit_posted_bytes = lb_slice16(new_credit_account, 33)
                         local debit_pending_bytes = lb_slice16(new_credit_account, 17)
                         local debit_total, debit_overflow = lb_add_u128(debit_posted_bytes, debit_pending_bytes)
                         if debit_overflow ~= 0 then
-                            error_code = 42
+                            error_code = ERR_EXCEEDS_CREDITS
                         elseif lb_compare_u128(credit_total, debit_total) == 1 then
-                            error_code = 43
+                            error_code = ERR_EXCEEDS_DEBITS
                         end
                     end
                 end
@@ -273,14 +325,21 @@ for i = 0, num_transfers - 1 do
                 end
             end
 
-            -- Rollback indexes by truncating to original lengths
+            -- Rollback indexes by restoring previous collection sizes.
             for key, original_len in pairs(index_original_lengths) do
-                if original_len == 0 then
-                    redis.call('DEL', key)
+                if string.sub(key, -10) == ":transfers" then
+                    local members = added_transfer_members[key]
+                    if members then
+                        for _, member in ipairs(members) do
+                            redis.call('ZREM', key, member)
+                        end
+                    end
                 else
-                    -- Truncate by getting the prefix and setting it back
-                    local truncated = redis.call('GETRANGE', key, 0, original_len - 1)
-                    redis.call('SET', key, truncated)
+                    if original_len == 0 then
+                        redis.call('DEL', key)
+                    else
+                        redis.call('LTRIM', key, 0, original_len - 1)
+                    end
                 end
             end
 
@@ -289,13 +348,14 @@ for i = 0, num_transfers - 1 do
                 if j == i then
                     results[j + 1] = lb_result(error_code)
                 else
-                    results[j + 1] = lb_result(1) -- ERR_LINKED_EVENT_FAILED
+                    results[j + 1] = lb_result(ERR_LINKED_EVENT_FAILED)
                 end
             end
 
             chain_start = nil
             modified_accounts = {}
             index_original_lengths = {}
+            added_transfer_members = {}
         else
             results[#results + 1] = lb_result(error_code)
         end
@@ -312,13 +372,7 @@ for i = 0, num_transfers - 1 do
 
         -- Commit changes
         local transfer_with_ts
-        if is_imported then
-            -- Use client-provided timestamp (must be non-zero)
-            transfer_with_ts = transfer_data
-        else
-            -- Server sets timestamp
-            transfer_with_ts = string.sub(transfer_data, 1, 120) .. ts_bytes
-        end
+        transfer_with_ts = string.sub(transfer_data, 1, 120) .. ts_bytes
 
         local debit_key = "account:" .. debit_account_id
         local credit_key = "account:" .. credit_account_id
@@ -334,17 +388,31 @@ for i = 0, num_transfers - 1 do
             local credit_transfers_key = "account:" .. credit_account_id .. ":transfers"
 
             if not index_original_lengths[debit_transfers_key] then
-                index_original_lengths[debit_transfers_key] = redis.call('STRLEN', debit_transfers_key)
+                index_original_lengths[debit_transfers_key] = redis.call('ZCARD', debit_transfers_key)
             end
             if not index_original_lengths[credit_transfers_key] then
-                index_original_lengths[credit_transfers_key] = redis.call('STRLEN', credit_transfers_key)
+                index_original_lengths[credit_transfers_key] = redis.call('ZCARD', credit_transfers_key)
             end
         end
 
-        -- Add to transfer indexes (simple append, sorting done at query time)
-        -- Append raw 16-byte transfer_id (fixed-size for easy rollback)
-        redis.call('APPEND', "account:" .. debit_account_id .. ":transfers", transfer_id)
-        redis.call('APPEND', "account:" .. credit_account_id .. ":transfers", transfer_id)
+        -- Add to transfer indexes using the same format as EloqKV:
+        -- sorted set member = 32-char hex transfer id, score = timestamp in microseconds
+        local transfer_timestamp = lb_decode_u64(transfer_with_ts, 121)
+        local transfer_score = tostring(math.floor(transfer_timestamp / 1000))
+        local debit_transfers_key = "account:" .. debit_account_id .. ":transfers"
+        local credit_transfers_key = "account:" .. credit_account_id .. ":transfers"
+        redis.call('ZADD', debit_transfers_key, transfer_score, transfer_id_hex)
+        redis.call('ZADD', credit_transfers_key, transfer_score, transfer_id_hex)
+        if chain_start ~= nil then
+            if not added_transfer_members[debit_transfers_key] then
+                added_transfer_members[debit_transfers_key] = {}
+            end
+            table.insert(added_transfer_members[debit_transfers_key], transfer_id_hex)
+            if not added_transfer_members[credit_transfers_key] then
+                added_transfer_members[credit_transfers_key] = {}
+            end
+            table.insert(added_transfer_members[credit_transfers_key], transfer_id_hex)
+        end
 
         -- Update balance history if accounts have HISTORY flag
         local ACCOUNT_FLAG_HISTORY = 0x08
@@ -364,8 +432,8 @@ for i = 0, num_transfers - 1 do
             local credits_pending = lb_slice16(account_data, 49)  -- offset 48, 16 bytes
             local credits_posted = lb_slice16(account_data, 65)   -- offset 64, 16 bytes
 
-            -- Return 128-byte AccountBalance: timestamp + balances + reserved (56 zero bytes)
-            return ts_bytes .. debits_pending .. debits_posted .. credits_pending .. credits_posted .. BALANCE_RESERVED
+            -- Return 128-byte AccountBalance in current TigerBeetle field order.
+            return debits_pending .. debits_posted .. credits_pending .. credits_posted .. ts_bytes .. BALANCE_RESERVED
         end
 
         if debit_has_history then
@@ -373,12 +441,12 @@ for i = 0, num_transfers - 1 do
             if chain_start ~= nil then
                 local debit_balance_key = "account:" .. debit_account_id .. ":balance_history"
                 if not index_original_lengths[debit_balance_key] then
-                    index_original_lengths[debit_balance_key] = redis.call('STRLEN', debit_balance_key)
+                    index_original_lengths[debit_balance_key] = redis.call('LLEN', debit_balance_key)
                 end
             end
 
             local debit_balance = encode_account_balance(new_debit_account)
-            redis.call('APPEND', "account:" .. debit_account_id .. ":balance_history", debit_balance)
+            redis.call('RPUSH', "account:" .. debit_account_id .. ":balance_history", debit_balance)
         end
 
         if credit_has_history then
@@ -386,12 +454,12 @@ for i = 0, num_transfers - 1 do
             if chain_start ~= nil then
                 local credit_balance_key = "account:" .. credit_account_id .. ":balance_history"
                 if not index_original_lengths[credit_balance_key] then
-                    index_original_lengths[credit_balance_key] = redis.call('STRLEN', credit_balance_key)
+                    index_original_lengths[credit_balance_key] = redis.call('LLEN', credit_balance_key)
                 end
             end
 
             local credit_balance = encode_account_balance(new_credit_account)
-            redis.call('APPEND', "account:" .. credit_account_id .. ":balance_history", credit_balance)
+            redis.call('RPUSH', "account:" .. credit_account_id .. ":balance_history", credit_balance)
         end
 
         results[#results + 1] = lb_result(0) -- ERR_OK
@@ -401,6 +469,7 @@ for i = 0, num_transfers - 1 do
             chain_start = nil
             modified_accounts = {}
             index_original_lengths = {}
+            added_transfer_members = {}
         end
     end
 end
@@ -425,19 +494,30 @@ if chain_start ~= nil then
         end
     end
 
-    -- Rollback indexes by truncating to original lengths
+    -- Rollback indexes by restoring previous collection sizes.
     for key, original_len in pairs(index_original_lengths) do
-        if original_len == 0 then
-            redis.call('DEL', key)
+        if string.sub(key, -10) == ":transfers" then
+            local members = added_transfer_members[key]
+            if members then
+                for _, member in ipairs(members) do
+                    redis.call('ZREM', key, member)
+                end
+            end
         else
-            -- Truncate by getting the prefix and setting it back
-            local truncated = redis.call('GETRANGE', key, 0, original_len - 1)
-            redis.call('SET', key, truncated)
+            if original_len == 0 then
+                redis.call('DEL', key)
+            else
+                redis.call('LTRIM', key, 0, original_len - 1)
+            end
         end
     end
 
     for j = chain_start, num_transfers - 1 do
-        results[j + 1] = lb_result(2) -- ERR_LINKED_EVENT_CHAIN_OPEN
+        if j == num_transfers - 1 then
+            results[j + 1] = lb_result(ERR_LINKED_EVENT_CHAIN_OPEN)
+        else
+            results[j + 1] = lb_result(ERR_LINKED_EVENT_FAILED)
+        end
     end
 end
 

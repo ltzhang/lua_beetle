@@ -15,18 +15,19 @@ r = redis.Redis(host='localhost', port=6379, decode_responses=False)
 
 # Error codes (matching TigerBeetle)
 ERR_OK = 0
-ERR_LINKED_EVENT_CHAIN_OPEN = 1
+ERR_LINKED_EVENT_CHAIN_OPEN = 2
 ERR_ID_ALREADY_EXISTS = 21
-ERR_EXISTS_WITH_DIFFERENT_FLAGS = 29
-ERR_PENDING_TRANSFER_NOT_FOUND = 34
-ERR_PENDING_TRANSFER_ALREADY_POSTED = 35
-ERR_PENDING_TRANSFER_ALREADY_VOIDED = 36
-ERR_DEBIT_ACCOUNT_NOT_FOUND = 38
-ERR_CREDIT_ACCOUNT_NOT_FOUND = 39
-ERR_ACCOUNTS_MUST_BE_DIFFERENT = 40
-ERR_EXCEEDS_CREDITS = 42
-ERR_EXCEEDS_DEBITS = 43
-ERR_LEDGER_MUST_MATCH = 52
+ERR_EXISTS = 46
+ERR_PENDING_TRANSFER_NOT_FOUND = 25
+ERR_PENDING_TRANSFER_ALREADY_POSTED = 33
+ERR_PENDING_TRANSFER_ALREADY_VOIDED = 34
+ERR_DEBIT_ACCOUNT_NOT_FOUND = 21
+ERR_CREDIT_ACCOUNT_NOT_FOUND = 22
+ERR_ACCOUNTS_MUST_BE_DIFFERENT = 12
+ERR_EXCEEDS_CREDITS = 54
+ERR_EXCEEDS_DEBITS = 55
+ERR_ACCOUNTS_MUST_HAVE_SAME_LEDGER = 23
+ERR_TRANSFER_LEDGER_MUST_MATCH = 24
 
 # Flags
 FLAG_LINKED = 0x0001
@@ -42,9 +43,12 @@ FILTER_REVERSED = 0x04
 
 # Load scripts
 def load_script(filename):
+    common_path = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'common.lua')
     script_path = os.path.join(os.path.dirname(__file__), '..', 'scripts', filename)
+    with open(common_path, 'r') as f:
+        common = f.read() + "\n"
     with open(script_path, 'r') as f:
-        return r.script_load(f.read())
+        return r.script_load(common + f.read())
 
 # Load all scripts
 create_account_sha = load_script('create_account.lua')
@@ -135,10 +139,10 @@ def encode_account_filter(account_id, timestamp_min=0, timestamp_max=2**64-1, li
 
     buf = bytearray(128)
     struct.pack_into('<QQ', buf, 0, account_id & 0xFFFFFFFFFFFFFFFF, (account_id >> 64) & 0xFFFFFFFFFFFFFFFF)
-    struct.pack_into('<Q', buf, 48, timestamp_min)
-    struct.pack_into('<Q', buf, 56, timestamp_max)
-    struct.pack_into('<I', buf, 64, limit)
-    struct.pack_into('<I', buf, 68, flags)
+    struct.pack_into('<Q', buf, 104, timestamp_min)
+    struct.pack_into('<Q', buf, 112, timestamp_max)
+    struct.pack_into('<I', buf, 120, limit)
+    struct.pack_into('<I', buf, 124, flags)
     return bytes(buf)
 
 def decode_result(result):
@@ -460,20 +464,20 @@ def test_get_account_balances():
         assert_equal(decode_result(result), ERR_OK, f"Transfer {i} should succeed")
 
     # Query balance history
-    account_filter = encode_account_filter(200, limit=10, flags=0)
+    account_filter = encode_account_filter(200, limit=10, flags=FILTER_DEBITS | FILTER_CREDITS)
     balances_blob = r.evalsha(get_balances_sha, 0, account_filter)
 
     # Should get 2 balance snapshots, 128 bytes each
     assert_equal(len(balances_blob), 2 * 128, "Should get 2 balance snapshots")
 
     # Verify balances increase
-    debits1 = bytes_to_u128(balances_blob, 24)  # First snapshot debits_posted
-    debits2 = bytes_to_u128(balances_blob[128:], 24)  # Second snapshot debits_posted
+    debits1 = bytes_to_u128(balances_blob, 16)  # First snapshot debits_posted
+    debits2 = bytes_to_u128(balances_blob[128:], 16)  # Second snapshot debits_posted
     assert_equal(debits1, 150, "First balance should be 150")
     assert_equal(debits2, 450, "Second balance should be 450 (150 + 300)")
 
     # Test account without HISTORY flag returns empty
-    account_filter = encode_account_filter(201, limit=10, flags=0)
+    account_filter = encode_account_filter(201, limit=10, flags=FILTER_DEBITS | FILTER_CREDITS)
     balances_blob = r.evalsha(get_balances_sha, 0, account_filter)
     assert_equal(len(balances_blob), 0, "Account without HISTORY should return empty")
 

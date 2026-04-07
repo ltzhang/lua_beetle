@@ -14,18 +14,20 @@ import (
 
 const (
 	ErrOK                           = 0
-	ErrLinkedEventChainOpen         = 1
+	ErrLinkedEventFailed            = 1
+	ErrLinkedEventChainOpen         = 2
 	ErrIDAlreadyExists              = 21
-	ErrExistsWithDifferentFlags     = 29
-	ErrPendingTransferNotFound      = 34
-	ErrPendingTransferAlreadyPosted = 35
-	ErrPendingTransferAlreadyVoided = 36
-	ErrDebitAccountNotFound         = 38
-	ErrCreditAccountNotFound        = 39
-	ErrAccountsMustBeDifferent      = 40
-	ErrExceedsCredits               = 42
-	ErrExceedsDebits                = 43
-	ErrLedgerMustMatch              = 52
+	ErrExists                       = 46
+	ErrPendingTransferNotFound      = 25
+	ErrPendingTransferAlreadyPosted = 33
+	ErrPendingTransferAlreadyVoided = 34
+	ErrDebitAccountNotFound         = 21
+	ErrCreditAccountNotFound        = 22
+	ErrAccountsMustBeDifferent      = 12
+	ErrExceedsCredits               = 54
+	ErrExceedsDebits                = 55
+	ErrAccountsMustHaveSameLedger   = 23
+	ErrTransferLedgerMustMatch      = 24
 )
 
 // ============================================================================
@@ -394,10 +396,10 @@ func (e *BinaryEncoder) EncodeAccountFilter(accountID uint64, timestampMin, time
 	buf := make([]byte, 128)
 
 	copy(buf[0:16], encodeU128(accountID))
-	binary.LittleEndian.PutUint64(buf[48:56], timestampMin)
-	binary.LittleEndian.PutUint64(buf[56:64], timestampMax)
-	binary.LittleEndian.PutUint32(buf[64:68], limit)
-	binary.LittleEndian.PutUint32(buf[68:72], flags)
+	binary.LittleEndian.PutUint64(buf[104:112], timestampMin)
+	binary.LittleEndian.PutUint64(buf[112:120], timestampMax)
+	binary.LittleEndian.PutUint32(buf[120:124], limit)
+	binary.LittleEndian.PutUint32(buf[124:128], flags)
 
 	return buf
 }
