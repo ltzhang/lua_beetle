@@ -24,20 +24,36 @@ local data_len = #transfers_data
 local ERR_INVALID_DATA_SIZE = 32
 local ERR_LINKED_EVENT_FAILED = 1
 local ERR_LINKED_EVENT_CHAIN_OPEN = 2
+local ERR_TIMESTAMP_MUST_BE_ZERO = 3
 local ERR_RESERVED_FLAG = 4
+local ERR_ID_MUST_NOT_BE_ZERO = 5
+local ERR_ID_MUST_NOT_BE_INT_MAX = 6
+local ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE = 7
+local ERR_DEBIT_ACCOUNT_ID_MUST_NOT_BE_ZERO = 8
+local ERR_DEBIT_ACCOUNT_ID_MUST_NOT_BE_INT_MAX = 9
+local ERR_CREDIT_ACCOUNT_ID_MUST_NOT_BE_ZERO = 10
+local ERR_CREDIT_ACCOUNT_ID_MUST_NOT_BE_INT_MAX = 11
 local ERR_EXISTS = 46
 local ERR_DEBIT_ACCOUNT_NOT_FOUND = 21
 local ERR_CREDIT_ACCOUNT_NOT_FOUND = 22
 local ERR_ACCOUNTS_MUST_BE_DIFFERENT = 12
 local ERR_ACCOUNTS_MUST_HAVE_THE_SAME_LEDGER = 23
 local ERR_TRANSFER_MUST_HAVE_THE_SAME_LEDGER_AS_ACCOUNTS = 24
+local ERR_LEDGER_MUST_NOT_BE_ZERO = 19
+local ERR_CODE_MUST_NOT_BE_ZERO = 20
+local ERR_PENDING_ID_MUST_BE_ZERO = 13
 local ERR_PENDING_ID_MUST_NOT_BE_ZERO = 14
+local ERR_PENDING_ID_MUST_NOT_BE_INT_MAX = 15
+local ERR_PENDING_ID_MUST_BE_DIFFERENT = 16
+local ERR_TIMEOUT_RESERVED_FOR_PENDING_TRANSFER = 17
 local ERR_PENDING_TRANSFER_NOT_FOUND = 25
 local ERR_PENDING_TRANSFER_NOT_PENDING = 26
 local ERR_PENDING_TRANSFER_HAS_DIFFERENT_DEBIT_ACCOUNT_ID = 27
 local ERR_PENDING_TRANSFER_HAS_DIFFERENT_CREDIT_ACCOUNT_ID = 28
 local ERR_PENDING_TRANSFER_HAS_DIFFERENT_LEDGER = 29
 local ERR_PENDING_TRANSFER_HAS_DIFFERENT_CODE = 30
+local ERR_EXCEEDS_PENDING_TRANSFER_AMOUNT = 31
+local ERR_PENDING_TRANSFER_HAS_DIFFERENT_AMOUNT = 32
 local ERR_PENDING_TRANSFER_ALREADY_POSTED = 33
 local ERR_PENDING_TRANSFER_ALREADY_VOIDED = 34
 local ERR_OVERFLOWS_DEBITS_PENDING = 47
@@ -112,13 +128,44 @@ for i = 0, num_transfers - 1 do
         error_code = ERR_RESERVED_FLAG
     end
 
+    -- Field-level validation (mirrors create_transfer.lua)
+    if error_code == 0 then
+        local zero_id = string.rep('\0', 16)
+        local max_id  = string.rep('\255', 16)
+        if transfer_id == zero_id then
+            error_code = ERR_ID_MUST_NOT_BE_ZERO
+        elseif transfer_id == max_id then
+            error_code = ERR_ID_MUST_NOT_BE_INT_MAX
+        elseif debit_account_id == zero_id then
+            error_code = ERR_DEBIT_ACCOUNT_ID_MUST_NOT_BE_ZERO
+        elseif debit_account_id == max_id then
+            error_code = ERR_DEBIT_ACCOUNT_ID_MUST_NOT_BE_INT_MAX
+        elseif credit_account_id == zero_id then
+            error_code = ERR_CREDIT_ACCOUNT_ID_MUST_NOT_BE_ZERO
+        elseif credit_account_id == max_id then
+            error_code = ERR_CREDIT_ACCOUNT_ID_MUST_NOT_BE_INT_MAX
+        elseif (is_post and is_void) or
+               (is_pending and (is_post or is_void)) then
+            error_code = ERR_FLAGS_ARE_MUTUALLY_EXCLUSIVE
+        elseif lb_decode_u32(transfer_data, 113) == 0 then
+            error_code = ERR_LEDGER_MUST_NOT_BE_ZERO
+        elseif lb_decode_u16(transfer_data, 117) == 0 then
+            error_code = ERR_CODE_MUST_NOT_BE_ZERO
+        else
+            local client_timestamp = lb_decode_u64(transfer_data, 121)
+            if not is_imported and client_timestamp ~= 0 then
+                error_code = ERR_TIMESTAMP_MUST_BE_ZERO
+            end
+        end
+    end
+
     -- Start chain tracking
     if chain_start == nil and is_linked then
         chain_start = i
     end
 
     -- Validate accounts are different
-    if debit_account_id == credit_account_id then
+    if error_code == 0 and debit_account_id == credit_account_id then
         error_code = ERR_ACCOUNTS_MUST_BE_DIFFERENT
     end
 
@@ -164,10 +211,24 @@ for i = 0, num_transfers - 1 do
 
             local pending_id_raw = lb_slice16(transfer_data, 65)
             local pending_id_hex = lb_hex16(pending_id_raw)
+            local timeout = lb_decode_u32(transfer_data, 109)
 
-            if is_post or is_void then
+            -- pending_id and timeout validation for non-post/void transfers
+            if not is_post and not is_void then
+                if pending_id_raw ~= lb_zero_16 then
+                    error_code = ERR_PENDING_ID_MUST_BE_ZERO
+                elseif not is_pending and timeout ~= 0 then
+                    error_code = ERR_TIMEOUT_RESERVED_FOR_PENDING_TRANSFER
+                end
+            end
+
+            if error_code == 0 and (is_post or is_void) then
                 if pending_id_raw == ZERO_ID then
                     error_code = ERR_PENDING_ID_MUST_NOT_BE_ZERO
+                elseif pending_id_raw == string.rep('\255', 16) then
+                    error_code = ERR_PENDING_ID_MUST_NOT_BE_INT_MAX
+                elseif pending_id_raw == transfer_id then
+                    error_code = ERR_PENDING_ID_MUST_BE_DIFFERENT
                 else
                     local pending_transfer_key = "transfer:" .. pending_id_hex
                     local pending_transfer = redis.call('GET', pending_transfer_key)
@@ -190,9 +251,13 @@ for i = 0, num_transfers - 1 do
                                 error_code = ERR_PENDING_TRANSFER_HAS_DIFFERENT_LEDGER
                             elseif lb_decode_u16(pending_transfer, 117) ~= lb_decode_u16(transfer_data, 117) then
                                 error_code = ERR_PENDING_TRANSFER_HAS_DIFFERENT_CODE
-                            elseif pending_amount_bytes ~= amount_bytes then
-                                error_code = is_void and 32 or ERR_PENDING_TRANSFER_NOT_FOUND
+                            elseif is_void and pending_amount_bytes ~= amount_bytes then
+                                error_code = ERR_PENDING_TRANSFER_HAS_DIFFERENT_AMOUNT
+                            elseif amount_bytes ~= lb_zero_16 and lb_compare_u128(amount_bytes, pending_amount_bytes) == 1 then
+                                error_code = ERR_EXCEEDS_PENDING_TRANSFER_AMOUNT
                             elseif is_post then
+                                -- amount==0 means "post the full pending amount"
+                                local amount_actual = (amount_bytes == lb_zero_16) and pending_amount_bytes or amount_bytes
                                 local debit_pending = lb_sub_field(debit_account, 17, pending_amount_bytes)
                                 if not debit_pending then
                                     error_code = ERR_PENDING_TRANSFER_ALREADY_POSTED
@@ -201,11 +266,11 @@ for i = 0, num_transfers - 1 do
                                     if not credit_pending then
                                         error_code = ERR_PENDING_TRANSFER_ALREADY_POSTED
                                     else
-                                        local debit_posted = lb_add_field(debit_account, 33, pending_amount_bytes)
+                                        local debit_posted = lb_add_field(debit_account, 33, amount_actual)
                                         if not debit_posted then
                                             error_code = ERR_OVERFLOWS_DEBITS_POSTED
                                         else
-                                            local credit_posted = lb_add_field(credit_account, 65, pending_amount_bytes)
+                                            local credit_posted = lb_add_field(credit_account, 65, amount_actual)
                                             if not credit_posted then
                                                 error_code = ERR_OVERFLOWS_CREDITS_POSTED
                                             else
@@ -232,7 +297,7 @@ for i = 0, num_transfers - 1 do
                         end
                     end
                 end
-            elseif is_pending then
+            elseif error_code == 0 and is_pending then
                 local debit_pending = lb_add_field(debit_account, 17, amount_bytes)
                 if not debit_pending then
                     error_code = ERR_OVERFLOWS_DEBITS_PENDING
@@ -245,7 +310,7 @@ for i = 0, num_transfers - 1 do
                         new_credit_account = string.sub(credit_account, 1, 48) .. credit_pending .. string.sub(credit_account, 65, 128)
                     end
                 end
-            else
+            elseif error_code == 0 then
                 local debit_posted = lb_add_field(debit_account, 33, amount_bytes)
                 if not debit_posted then
                     error_code = ERR_OVERFLOWS_DEBITS_POSTED

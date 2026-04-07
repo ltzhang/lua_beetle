@@ -278,7 +278,9 @@ if is_post or is_void then
 
     if is_post then
         -- POST_PENDING_TRANSFER: move from pending to posted
-        -- Reduce pending balances
+        -- amount==0 means "post the full pending amount"
+        local amount_actual = (amount_bytes == lb_zero_16) and pending_amount_bytes or amount_bytes
+        -- Reduce pending balances by the full original pending amount
         local debit_pending = lb_sub_field(debit_account, 17, pending_amount_bytes)
         if not debit_pending then
             return lb_result(ERR_PENDING_TRANSFER_ALREADY_POSTED)
@@ -288,12 +290,12 @@ if is_post or is_void then
             return lb_result(ERR_PENDING_TRANSFER_ALREADY_POSTED)
         end
 
-        -- Increase posted balances
-        local debit_posted = lb_add_field(debit_account, 33, pending_amount_bytes)
+        -- Increase posted balances by the actual posted amount
+        local debit_posted = lb_add_field(debit_account, 33, amount_actual)
         if not debit_posted then
             return lb_result(ERR_OVERFLOWS_DEBITS_POSTED)
         end
-        local credit_posted = lb_add_field(credit_account, 65, pending_amount_bytes)
+        local credit_posted = lb_add_field(credit_account, 65, amount_actual)
         if not credit_posted then
             return lb_result(ERR_OVERFLOWS_CREDITS_POSTED)
         end
